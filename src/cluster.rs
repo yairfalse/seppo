@@ -19,11 +19,11 @@ use std::process::Command;
 /// }
 /// ```
 pub async fn create(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔧 Creating kind cluster: {}", name);
+    println!("Creating kind cluster: {}", name);
 
     // Check if cluster already exists
     if cluster_exists(name)? {
-        println!("✅ Cluster {} already exists, reusing", name);
+        println!("Cluster {} already exists, reusing", name);
         return Ok(());
     }
 
@@ -66,7 +66,7 @@ networking:
     // Install Gateway API CRDs (if needed for your tests)
     install_gateway_api_crds().await?;
 
-    println!("✅ Cluster {} created successfully", name);
+    println!("Cluster {} created successfully", name);
     Ok(())
 }
 
@@ -84,7 +84,7 @@ networking:
 /// }
 /// ```
 pub async fn delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🗑️  Deleting kind cluster: {}", name);
+    println!("Deleting kind cluster: {}", name);
 
     let output = Command::new("kind")
         .args(&["delete", "cluster", "--name", name])
@@ -98,7 +98,7 @@ pub async fn delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    println!("✅ Cluster {} deleted", name);
+    println!("Cluster {} deleted", name);
     Ok(())
 }
 
@@ -114,7 +114,7 @@ fn cluster_exists(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
 ///
 /// This is optional but useful for testing Gateway API controllers.
 async fn install_gateway_api_crds() -> Result<(), Box<dyn std::error::Error>> {
-    println!("📦 Installing Gateway API CRDs");
+    println!("Installing Gateway API CRDs");
 
     let output = Command::new("kubectl")
         .args(&[
@@ -153,7 +153,7 @@ pub async fn load_image(
     cluster_name: &str,
     image: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("📦 Loading image {} into cluster {}", image, cluster_name);
+    println!("Loading image {} into cluster {}", image, cluster_name);
 
     let output = Command::new("kind")
         .args(&["load", "docker-image", image, "--name", cluster_name])

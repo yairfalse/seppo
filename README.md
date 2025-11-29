@@ -8,12 +8,12 @@ A lightweight Kubernetes testing framework for integration tests, designed for b
 
 ## Features
 
-- 🔧 **Kind Cluster Management**: Create and destroy Kind clusters programmatically
-- 🚀 **Docker Image Loading**: Load local Docker images into Kind clusters
-- 🌐 **Gateway API Support**: Automatic installation of Gateway API CRDs
-- 🦀 **Rust Native**: Written in Rust, ergonomic Rust library API
-- 🔧 **Go Compatible**: CLI tool for Go projects (future)
-- ⚡ **Fast**: Minimal dependencies, quick cluster creation
+- **Kind Cluster Management**: Create and destroy Kind clusters programmatically
+- **Docker Image Loading**: Load local Docker images into Kind clusters
+- **Gateway API Support**: Automatic installation of Gateway API CRDs
+- **Rust Native**: Written in Rust, ergonomic Rust library API
+- **Go Compatible**: CLI tool for Go projects (future)
+- **Fast**: Minimal dependencies, quick cluster creation
 
 ---
 
@@ -186,18 +186,18 @@ Both share the same core cluster management logic, ensuring consistency across y
 
 ### Current: Kind (Kubernetes in Docker)
 
-- ✅ Create/delete clusters
-- ✅ Custom node configuration
-- ✅ Load Docker images
-- ✅ Gateway API CRD installation
+- Create/delete clusters
+- Custom node configuration
+- Load Docker images
+- Gateway API CRD installation
 
 ### Future: Multi-Cloud (Planned)
 
-- ⏳ EKS (AWS Elastic Kubernetes Service)
-- ⏳ AKS (Azure Kubernetes Service)
-- ⏳ GKE (Google Kubernetes Engine)
-- ⏳ K3s (Lightweight Kubernetes)
-- ⏳ Existing clusters (use your own kubeconfig)
+- EKS (AWS Elastic Kubernetes Service)
+- AKS (Azure Kubernetes Service)
+- GKE (Google Kubernetes Engine)
+- K3s (Lightweight Kubernetes)
+- Existing clusters (use your own kubeconfig)
 
 ---
 
@@ -330,4 +330,4 @@ A: Different approach:
 
 ---
 
-**Built with 🔨 for the Kubernetes community**
+**Built for the Kubernetes community**
