@@ -39,7 +39,7 @@ async fn example_test_rauta_gateway() -> Result<(), Box<dyn std::error::Error>> 
     // Step 2: Build RAUTA Docker image
     println!("🏗️  Building RAUTA Docker image...");
     let build_status = Command::new("docker")
-        .args(&[
+        .args([
             "build",
             "-t",
             "rauta:test",
@@ -61,7 +61,7 @@ async fn example_test_rauta_gateway() -> Result<(), Box<dyn std::error::Error>> 
     // Step 4: Deploy RAUTA
     println!("🚀 Deploying RAUTA to cluster...");
     Command::new("kubectl")
-        .args(&["apply", "-f", "deploy/rauta-daemonset.yaml"])
+        .args(["apply", "-f", "deploy/rauta-daemonset.yaml"])
         .current_dir("../rauta")
         .status()?;
 
@@ -73,7 +73,7 @@ async fn example_test_rauta_gateway() -> Result<(), Box<dyn std::error::Error>> 
     println!("🧪 Running TLS validation tests...");
 
     // Create Kubernetes client
-    let client = kube::Client::try_default().await?;
+    let _client = kube::Client::try_default().await?;
 
     // Test 1: Deploy Gateway with valid TLS secret
     // ... (your test logic here)
