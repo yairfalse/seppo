@@ -5,6 +5,98 @@
 //! - Capture stdout/stderr
 //! - Report exit code and pass/fail status
 
+use std::collections::HashMap;
+use std::process::Command;
+
+/// Result of running a test command
+#[derive(Debug)]
+pub struct RunResult {
+    /// Exit code from the command (0 = success)
+    pub exit_code: i32,
+    /// Standard output
+    pub stdout: String,
+    /// Standard error
+    pub stderr: String,
+}
+
+impl RunResult {
+    /// Returns true if the command succeeded (exit code 0)
+    pub fn passed(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+/// Runner errors
+#[derive(Debug, thiserror::Error)]
+pub enum RunnerError {
+    #[error("Command not found: {0}")]
+    CommandNotFound(String),
+
+    #[error("Execution failed: {0}")]
+    ExecutionFailed(String),
+}
+
+/// Run a command and capture its output
+///
+/// # Arguments
+/// * `program` - The program to run
+/// * `args` - Command line arguments
+///
+/// # Returns
+/// * `RunResult` with exit code, stdout, and stderr
+pub async fn run(program: &str, args: &[&str]) -> Result<RunResult, RunnerError> {
+    run_with_env(program, args, &HashMap::new()).await
+}
+
+/// Run a command with environment variables
+///
+/// # Arguments
+/// * `program` - The program to run
+/// * `args` - Command line arguments
+/// * `env` - Environment variables to set
+///
+/// # Returns
+/// * `RunResult` with exit code, stdout, and stderr
+pub async fn run_with_env(
+    program: &str,
+    args: &[&str],
+    env: &HashMap<String, String>,
+) -> Result<RunResult, RunnerError> {
+    println!("Running: {} {}", program, args.join(" "));
+
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+
+    // Add environment variables
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    let output = cmd.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            RunnerError::CommandNotFound(program.to_string())
+        } else {
+            RunnerError::ExecutionFailed(e.to_string())
+        }
+    })?;
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if exit_code == 0 {
+        println!("Command succeeded");
+    } else {
+        println!("Command failed with exit code {}", exit_code);
+    }
+
+    Ok(RunResult {
+        exit_code,
+        stdout,
+        stderr,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
