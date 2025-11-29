@@ -87,7 +87,7 @@ fn default_timeout() -> String {
 
 impl Config {
     /// Parse config from YAML string
-    pub fn from_str(yaml: &str) -> Result<Self, ConfigError> {
+    pub fn parse(yaml: &str) -> Result<Self, ConfigError> {
         if yaml.trim().is_empty() {
             return Err(ConfigError::Empty);
         }
@@ -106,7 +106,15 @@ impl Config {
         let content = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::ReadError(e.to_string()))?;
 
-        Self::from_str(&content)
+        Self::parse(&content)
+    }
+}
+
+impl std::str::FromStr for Config {
+    type Err = ConfigError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
     }
 }
 
@@ -137,7 +145,7 @@ cluster:
   name: test-cluster
 "#;
 
-        let config = Config::from_str(yaml).expect("Should parse minimal config");
+        let config: Config = yaml.parse().expect("Should parse minimal config");
 
         assert_eq!(config.cluster.name, "test-cluster");
         assert_eq!(config.cluster.workers, 2); // default
@@ -172,7 +180,7 @@ environment:
     TEST_URL: "http://localhost:8080"
 "#;
 
-        let config = Config::from_str(yaml).expect("Should parse full config");
+        let config: Config = yaml.parse().expect("Should parse full config");
 
         // Cluster
         assert_eq!(config.cluster.name, "rauta-test");
@@ -229,14 +237,14 @@ cluster:
   workers: 2
 "#;
 
-        let result = Config::from_str(yaml);
+        let result: Result<Config, _> = yaml.parse();
         assert!(result.is_err(), "Should fail without cluster name");
     }
 
     #[test]
     fn test_parse_config_empty_fails() {
         let yaml = "";
-        let result = Config::from_str(yaml);
+        let result: Result<Config, _> = yaml.parse();
         assert!(result.is_err(), "Should fail on empty config");
     }
 }

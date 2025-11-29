@@ -28,8 +28,7 @@ pub async fn create(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create cluster with custom config
-    let config = format!(
-        r#"
+    let config = r#"
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -39,13 +38,12 @@ nodes:
 networking:
   disableDefaultCNI: false
   podSubnet: "10.244.0.0/16"
-"#
-    );
+"#.to_string();
 
     std::fs::write("/tmp/kind-config.yaml", config)?;
 
     let output = Command::new("kind")
-        .args(&[
+        .args([
             "create",
             "cluster",
             "--name",
@@ -87,7 +85,7 @@ pub async fn delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Deleting kind cluster: {}", name);
 
     let output = Command::new("kind")
-        .args(&["delete", "cluster", "--name", name])
+        .args(["delete", "cluster", "--name", name])
         .output()?;
 
     if !output.status.success() {
@@ -104,7 +102,7 @@ pub async fn delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Check if a kind cluster exists
 fn cluster_exists(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let output = Command::new("kind").args(&["get", "clusters"]).output()?;
+    let output = Command::new("kind").args(["get", "clusters"]).output()?;
 
     let clusters = String::from_utf8(output.stdout)?;
     Ok(clusters.lines().any(|line| line.trim() == name))
@@ -117,7 +115,7 @@ async fn install_gateway_api_crds() -> Result<(), Box<dyn std::error::Error>> {
     println!("Installing Gateway API CRDs");
 
     let output = Command::new("kubectl")
-        .args(&[
+        .args([
             "apply",
             "-f",
             "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/standard-install.yaml",
@@ -156,7 +154,7 @@ pub async fn load_image(
     println!("Loading image {} into cluster {}", image, cluster_name);
 
     let output = Command::new("kind")
-        .args(&["load", "docker-image", image, "--name", cluster_name])
+        .args(["load", "docker-image", image, "--name", cluster_name])
         .output()?;
 
     if !output.status.success() {

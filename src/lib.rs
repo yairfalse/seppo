@@ -40,4 +40,4 @@ pub mod config;
 
 // Re-export commonly used types
 pub use cluster::{create, delete, load_image};
-pub use config::Config;
+pub use config::{Config, ClusterConfig, EnvironmentConfig, WaitCondition, ConfigError};
