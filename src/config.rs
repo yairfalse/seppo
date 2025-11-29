@@ -23,12 +23,35 @@ pub struct ClusterConfig {
     /// Cluster name (required)
     pub name: String,
 
+    /// Cluster provider (default: kind)
+    #[serde(default)]
+    pub provider: ClusterProviderType,
+
     /// Number of worker nodes (default: 2)
     #[serde(default = "default_workers")]
     pub workers: u32,
 
-    /// Kubernetes version (optional, uses Kind default)
+    /// Kubernetes version (optional, uses provider default)
     pub k8s_version: Option<String>,
+
+    /// Minikube driver (docker, hyperkit, virtualbox)
+    pub driver: Option<String>,
+
+    /// Kubeconfig path (for provider: existing)
+    pub kubeconfig: Option<String>,
+
+    /// Kubectl context (for provider: existing)
+    pub context: Option<String>,
+}
+
+/// Cluster provider type
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterProviderType {
+    #[default]
+    Kind,
+    Minikube,
+    Existing,
 }
 
 fn default_workers() -> u32 {
