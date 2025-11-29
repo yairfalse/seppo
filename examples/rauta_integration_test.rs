@@ -7,13 +7,29 @@
 //! 4. Run integration tests
 //! 5. Cleanup
 //!
-//! Run with: cargo test --example rauta_integration_test
+//! Run with: cargo run --example rauta_integration_test
 
 use seppo::cluster;
 use std::process::Command;
 
-#[tokio::test]
-async fn test_rauta_gateway_tls_validation() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("RAUTA Integration Test Example");
+    println!("This example shows how to use Seppo for testing.");
+    println!();
+    println!("In a real test, you would:");
+    println!("1. cluster::create(\"rauta-test\")");
+    println!("2. Build Docker image");
+    println!("3. cluster::load_image(\"rauta-test\", \"rauta:test\")");
+    println!("4. Deploy and run tests");
+    println!("5. cluster::delete(\"rauta-test\")");
+
+    Ok(())
+}
+
+/// Example test function (run with cargo test --example)
+#[allow(dead_code)]
+async fn example_test_rauta_gateway() -> Result<(), Box<dyn std::error::Error>> {
     let cluster_name = "rauta-test";
 
     // Step 1: Create Kind cluster

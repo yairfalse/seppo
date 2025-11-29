@@ -42,4 +42,4 @@ pub mod provider;
 // Re-export commonly used types
 pub use cluster::{create, delete, load_image};
 pub use config::{Config, ClusterConfig, ClusterProviderType, EnvironmentConfig, WaitCondition, ConfigError};
-pub use provider::{ClusterProvider, get_provider};
+pub use provider::{ClusterProvider, ProviderError, get_provider, KindProvider, MinikubeProvider, ExistingProvider};
