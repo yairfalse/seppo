@@ -145,8 +145,10 @@ Everyone reinvents this. Seppo does it once, correctly.
 # seppo.yaml - Test environment definition
 cluster:
   name: rauta-test
+  provider: kind              # kind | minikube | existing (default: kind)
   workers: 3
-  k8s_version: "1.31.0"  # optional
+  k8s_version: "1.31.0"       # optional
+  kubeconfig: ~/.kube/config  # for provider: existing
 
 environment:
   # Docker images to load into cluster
@@ -180,7 +182,142 @@ environment:
   env:
     TEST_GATEWAY_URL: "http://localhost:8080"
     TEST_NAMESPACE: "test"
+
+  # Optional: Use Skaffold for build/deploy (if you already use it)
+  skaffold:
+    config: ./skaffold.yaml   # path to skaffold.yaml
+    profile: test             # optional skaffold profile
 ```
+
+---
+
+## CLUSTER PROVIDERS
+
+**Seppo supports multiple cluster providers:**
+
+| Provider | Use Case | Status |
+|----------|----------|--------|
+| `kind` | Local testing, CI (default) | Implemented |
+| `minikube` | Local testing with VM/Docker | Planned |
+| `existing` | Use your own cluster | Planned |
+
+### Provider: Kind (Default)
+
+```yaml
+cluster:
+  name: my-test
+  provider: kind
+  workers: 2
+  k8s_version: "1.31.0"
+```
+
+- Creates Kind cluster with specified workers
+- Loads Docker images directly
+- Fast startup, no VM overhead
+- Best for CI/CD
+
+### Provider: Minikube
+
+```yaml
+cluster:
+  name: my-test
+  provider: minikube
+  workers: 2
+  k8s_version: "1.31.0"
+  driver: docker              # docker | hyperkit | virtualbox
+```
+
+- Creates Minikube cluster
+- Better Docker registry integration
+- Supports addons (ingress, metrics-server, etc.)
+- Good for local development
+
+### Provider: Existing
+
+```yaml
+cluster:
+  provider: existing
+  kubeconfig: ~/.kube/config
+  context: my-cluster         # optional, uses current context if not set
+```
+
+- Uses existing cluster (no create/delete)
+- For remote clusters or pre-created environments
+- Skips cluster lifecycle, goes straight to environment setup
+
+### ClusterProvider Trait (Internal)
+
+```rust
+#[async_trait]
+pub trait ClusterProvider: Send + Sync {
+    /// Create a new cluster
+    async fn create(&self, config: &ClusterConfig) -> Result<(), SeppoError>;
+
+    /// Delete the cluster
+    async fn delete(&self, name: &str) -> Result<(), SeppoError>;
+
+    /// Load a Docker image into the cluster
+    async fn load_image(&self, cluster: &str, image: &str) -> Result<(), SeppoError>;
+
+    /// Check if cluster exists
+    async fn exists(&self, name: &str) -> Result<bool, SeppoError>;
+
+    /// Get kubeconfig for the cluster
+    async fn kubeconfig(&self, name: &str) -> Result<String, SeppoError>;
+}
+
+// Implementations
+pub struct KindProvider;      // Current
+pub struct MinikubeProvider;  // Planned
+pub struct ExistingProvider;  // Planned
+```
+
+---
+
+## SKAFFOLD INTEGRATION (Optional)
+
+**For users who already use Skaffold:**
+
+Skaffold handles image building and K8s deployment well. Instead of reinventing, Seppo can optionally use Skaffold for environment setup.
+
+```yaml
+# seppo.yaml - With Skaffold
+cluster:
+  name: my-test
+  provider: kind
+
+environment:
+  # Instead of images + manifests, use Skaffold
+  skaffold:
+    config: ./skaffold.yaml
+    profile: test
+
+  # Wait conditions still apply
+  wait:
+    - condition: available
+      resource: deployment/my-app
+      timeout: 120s
+```
+
+**How it works:**
+
+```
+1. Seppo creates cluster (Kind/Minikube)
+2. IF skaffold configured:
+     → Seppo runs: skaffold run -f <config> -p <profile>
+     → Skaffold builds images, deploys to cluster
+   ELSE:
+     → Seppo loads images manually (kind load / minikube image load)
+     → Seppo applies manifests (kubectl apply)
+3. Seppo waits for readiness
+4. Seppo runs tests
+5. Cleanup when asked
+```
+
+**Benefits:**
+- Simple users: just images + manifests (no extra tools)
+- Power users: full Skaffold pipeline (build, push, deploy)
+- Seppo stays focused on test orchestration
 
 **Example: RAUTA Gateway API Controller Test**
 
@@ -495,7 +632,10 @@ git commit -m "refactor: extract kubectl helpers to separate module"
 
 ### v0.2.0 (Next - Test Orchestrator)
 
-- [ ] `seppo.yaml` configuration format
+- [x] `seppo.yaml` configuration format (DONE)
+- [ ] ClusterProvider trait abstraction
+- [ ] Minikube provider support
+- [ ] Existing cluster provider support
 - [ ] Environment setup (manifests, images, wait conditions)
 - [ ] `seppo test` command (full orchestration)
 - [ ] `seppo setup` command (environment only)
@@ -503,6 +643,7 @@ git commit -m "refactor: extract kubectl helpers to separate module"
 - [ ] `seppo status` command
 - [ ] Test result capture and reporting
 - [ ] Setup script support
+- [ ] Optional Skaffold integration
 
 ### v0.3.0 (Future)
 
@@ -510,8 +651,7 @@ git commit -m "refactor: extract kubectl helpers to separate module"
 - [ ] Test isolation (namespaced environments)
 - [ ] Environment snapshots/restore
 - [ ] CI/CD mode (optimized for GitHub Actions)
-- [ ] Multi-cluster support (EKS, AKS, GKE)
-- [ ] ClusterProvider trait abstraction
+- [ ] Multi-cloud support (EKS, AKS, GKE)
 
 ---
 
@@ -524,10 +664,15 @@ seppo/
 ├── CLAUDE.md               # This file - AI assistant context
 ├── src/
 │   ├── lib.rs              # Crate root, public exports
-│   ├── cluster.rs          # Kind cluster management (v0.1.0)
-│   ├── config.rs           # seppo.yaml parsing (v0.2.0)
+│   ├── config.rs           # seppo.yaml parsing (v0.1.0 - DONE)
+│   ├── provider/           # Cluster providers (v0.2.0)
+│   │   ├── mod.rs          # ClusterProvider trait
+│   │   ├── kind.rs         # Kind provider (current cluster.rs)
+│   │   ├── minikube.rs     # Minikube provider
+│   │   └── existing.rs     # Existing cluster provider
 │   ├── environment.rs      # Environment setup (v0.2.0)
 │   ├── runner.rs           # Test execution (v0.2.0)
+│   ├── skaffold.rs         # Skaffold integration (v0.2.0, optional)
 │   └── cleanup.rs          # Cleanup management (v0.2.0)
 ├── src/bin/
 │   └── seppo.rs            # CLI binary (v0.2.0)
