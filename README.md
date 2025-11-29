@@ -201,28 +201,6 @@ Both share the same core cluster management logic, ensuring consistency across y
 
 ---
 
-## Comparison with Alternatives
-
-### vs Testkube
-
-- **Testkube**: Run app tests *inside* Kubernetes
-- **Seppo**: Manage Kubernetes clusters *for* integration tests
-- **Use case**: Different! Use Seppo to create clusters, Testkube to orchestrate tests.
-
-### vs Kind CLI
-
-- **Kind CLI**: Manual cluster management via shell
-- **Seppo**: Programmatic API (Rust) + CLI (Go-friendly)
-- **Benefit**: Type-safe Rust API, consistent across projects
-
-### vs Custom Scripts
-
-- **Custom scripts**: Each project has own cluster management
-- **Seppo**: Shared library, consistent behavior
-- **Benefit**: DRY (Don't Repeat Yourself), easier to maintain
-
----
-
 ## Development
 
 ### Building from Source
