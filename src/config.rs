@@ -2,6 +2,130 @@
 //!
 //! Defines the structure of test environment configuration.
 
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Main configuration for Seppo test environment
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    /// Cluster configuration
+    pub cluster: ClusterConfig,
+
+    /// Environment setup configuration
+    #[serde(default)]
+    pub environment: EnvironmentConfig,
+}
+
+/// Cluster configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClusterConfig {
+    /// Cluster name (required)
+    pub name: String,
+
+    /// Number of worker nodes (default: 2)
+    #[serde(default = "default_workers")]
+    pub workers: u32,
+
+    /// Kubernetes version (optional, uses Kind default)
+    pub k8s_version: Option<String>,
+}
+
+fn default_workers() -> u32 {
+    2
+}
+
+/// Environment setup configuration
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EnvironmentConfig {
+    /// Docker images to load into cluster
+    #[serde(default)]
+    pub images: Vec<String>,
+
+    /// K8s manifests to apply (in order)
+    #[serde(default)]
+    pub manifests: Vec<String>,
+
+    /// Wait conditions before running tests
+    #[serde(default)]
+    pub wait: Vec<WaitCondition>,
+
+    /// Optional setup script to run after manifests
+    pub setup_script: Option<String>,
+
+    /// Environment variables to export for tests
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+/// Wait condition for resource readiness
+#[derive(Debug, Clone, Deserialize)]
+pub struct WaitCondition {
+    /// Condition type (available, ready, programmed, etc.)
+    pub condition: String,
+
+    /// Resource to wait for (e.g., deployment/test-backend)
+    pub resource: String,
+
+    /// Namespace (optional, defaults to "default")
+    pub namespace: Option<String>,
+
+    /// Timeout (e.g., "120s")
+    #[serde(default = "default_timeout")]
+    pub timeout: String,
+
+    /// Number of replicas to wait for (optional)
+    pub replicas: Option<u32>,
+
+    /// Label selector (optional)
+    pub selector: Option<String>,
+}
+
+fn default_timeout() -> String {
+    "60s".to_string()
+}
+
+impl Config {
+    /// Parse config from YAML string
+    pub fn from_str(yaml: &str) -> Result<Self, ConfigError> {
+        if yaml.trim().is_empty() {
+            return Err(ConfigError::Empty);
+        }
+
+        serde_yaml::from_str(yaml).map_err(|e| ConfigError::ParseError(e.to_string()))
+    }
+
+    /// Parse config from file path
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+
+        if !path.exists() {
+            return Err(ConfigError::NotFound(path.display().to_string()));
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| ConfigError::ReadError(e.to_string()))?;
+
+        Self::from_str(&content)
+    }
+}
+
+/// Configuration errors
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("Config file not found: {0}")]
+    NotFound(String),
+
+    #[error("Failed to read config: {0}")]
+    ReadError(String),
+
+    #[error("Failed to parse config: {0}")]
+    ParseError(String),
+
+    #[error("Config is empty")]
+    Empty,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
