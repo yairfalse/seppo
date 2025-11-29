@@ -1,11 +1,24 @@
 //! Kind cluster management for integration testing
 //!
-//! Provides functions for creating, deleting, and managing Kind clusters
-//! for Kubernetes controller and application testing.
+//! Provides simple functions for creating, deleting, and managing Kind clusters.
+//! For more control, use the `provider` module directly.
+//!
+//! **Note**: This module uses `KindProvider` internally. For multi-provider
+//! support (Kind, Minikube, Existing), use `seppo::provider::get_provider()`.
 
 use std::process::Command;
 
-/// Create a kind cluster with specified name and configuration
+use crate::config::{ClusterConfig, ClusterProviderType};
+use crate::provider::{ClusterProvider, KindProvider};
+
+/// Create a kind cluster with specified name and default configuration
+///
+/// This is a convenience function that uses `KindProvider` with defaults:
+/// - 2 worker nodes
+/// - Default Kubernetes version
+/// - Gateway API CRDs installed
+///
+/// For more control, use `seppo::provider::get_provider()` with a `Config`.
 ///
 /// # Examples
 ///
@@ -19,52 +32,22 @@ use std::process::Command;
 /// }
 /// ```
 pub async fn create(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating kind cluster: {}", name);
+    let provider = KindProvider::new();
+    let config = ClusterConfig {
+        name: name.to_string(),
+        provider: ClusterProviderType::Kind,
+        workers: 2,
+        k8s_version: None,
+        driver: None,
+        kubeconfig: None,
+        context: None,
+    };
 
-    // Check if cluster already exists
-    if cluster_exists(name)? {
-        println!("Cluster {} already exists, reusing", name);
-        return Ok(());
-    }
-
-    // Create cluster with custom config
-    let config = r#"
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-- role: worker
-- role: worker
-networking:
-  disableDefaultCNI: false
-  podSubnet: "10.244.0.0/16"
-"#.to_string();
-
-    std::fs::write("/tmp/kind-config.yaml", config)?;
-
-    let output = Command::new("kind")
-        .args([
-            "create",
-            "cluster",
-            "--name",
-            name,
-            "--config",
-            "/tmp/kind-config.yaml",
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to create cluster: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
+    provider.create(&config).await?;
 
     // Install Gateway API CRDs (if needed for your tests)
     install_gateway_api_crds().await?;
 
-    println!("Cluster {} created successfully", name);
     Ok(())
 }
 
@@ -82,30 +65,15 @@ networking:
 /// }
 /// ```
 pub async fn delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Deleting kind cluster: {}", name);
-
-    let output = Command::new("kind")
-        .args(["delete", "cluster", "--name", name])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to delete cluster: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-
-    println!("Cluster {} deleted", name);
+    let provider = KindProvider::new();
+    provider.delete(name).await?;
     Ok(())
 }
 
 /// Check if a kind cluster exists
-fn cluster_exists(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let output = Command::new("kind").args(["get", "clusters"]).output()?;
-
-    let clusters = String::from_utf8(output.stdout)?;
-    Ok(clusters.lines().any(|line| line.trim() == name))
+pub async fn exists(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let provider = KindProvider::new();
+    Ok(provider.exists(name).await?)
 }
 
 /// Install Gateway API CRDs into the cluster
@@ -151,20 +119,8 @@ pub async fn load_image(
     cluster_name: &str,
     image: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Loading image {} into cluster {}", image, cluster_name);
-
-    let output = Command::new("kind")
-        .args(["load", "docker-image", image, "--name", cluster_name])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to load image: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-
+    let provider = KindProvider::new();
+    provider.load_image(cluster_name, image).await?;
     Ok(())
 }
 
@@ -182,7 +138,7 @@ mod tests {
 
         // Verify it exists
         assert!(
-            cluster_exists(cluster_name).unwrap(),
+            exists(cluster_name).await.unwrap(),
             "Cluster should exist after creation"
         );
 
@@ -191,7 +147,7 @@ mod tests {
 
         // Verify it's gone
         assert!(
-            !cluster_exists(cluster_name).unwrap(),
+            !exists(cluster_name).await.unwrap(),
             "Cluster should not exist after deletion"
         );
     }
