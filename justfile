@@ -101,6 +101,16 @@ setup:
   brew install just kind kubectl
   @echo "✅ Setup complete!"
 
+# Install git hooks (pre-commit)
+install-hooks:
+  @echo "🔗 Installing git hooks..."
+  @if [ ! -f .git/hooks/pre-commit ]; then \
+    echo "⚠️  Pre-commit hook not found (expected in .git/hooks/pre-commit)"; \
+  else \
+    chmod +x .git/hooks/pre-commit && echo "✅ Pre-commit hook installed"; \
+  fi
+  @echo "✅ Hooks ready!"
+
 # === Git Shortcuts ===
 
 # Commit (with pre-commit checks)
