@@ -3,7 +3,7 @@
 //! Uses an existing Kubernetes cluster (no lifecycle management).
 
 use async_trait::async_trait;
-use log::{debug, info};
+use tracing::{debug, info};
 
 use super::{ClusterProvider, ProviderError};
 use crate::config::ClusterConfig;
