@@ -6,8 +6,8 @@
 //! **Note**: This module uses `KindProvider` internally. For multi-provider
 //! support (Kind, Minikube, Existing), use `seppo::provider::get_provider()`.
 
-use log::info;
 use std::process::Command;
+use tracing::info;
 
 use crate::config::{ClusterConfig, ClusterProviderType};
 use crate::provider::{ClusterProvider, KindProvider};
