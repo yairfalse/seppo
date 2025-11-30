@@ -128,10 +128,11 @@ impl Drop for TelemetryGuard {
 pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     if !config.enabled {
         // Just set up basic tracing without OTLP export
-        tracing_subscriber::registry()
+        // Use try_init to avoid panic if called multiple times
+        let _ = tracing_subscriber::registry()
             .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
             .with(tracing_subscriber::fmt::layer())
-            .init();
+            .try_init();
 
         return Ok(TelemetryGuard {
             tracer_provider: None,
@@ -163,11 +164,12 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, Teleme
     let telemetry_layer = tracing_opentelemetry::layer()
         .with_tracer(tracer_provider.tracer("seppo"));
 
-    tracing_subscriber::registry()
+    // Use try_init to avoid panic if called multiple times
+    let _ = tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .with(telemetry_layer)
-        .init();
+        .try_init();
 
     info!(
         endpoint = %config.otlp_endpoint,
