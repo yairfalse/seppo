@@ -3,8 +3,8 @@
 //! Creates and manages Minikube clusters.
 
 use async_trait::async_trait;
-use log::{debug, info};
 use std::process::Command;
+use tracing::{debug, info, instrument};
 
 use super::{ClusterProvider, ProviderError};
 use crate::config::ClusterConfig;
@@ -26,6 +26,7 @@ impl Default for MinikubeProvider {
 
 #[async_trait]
 impl ClusterProvider for MinikubeProvider {
+    #[instrument(skip(self), fields(cluster_name = %config.name, provider = "minikube"))]
     async fn create(&self, config: &ClusterConfig) -> Result<(), ProviderError> {
         // Check if cluster already exists
         if self.exists(&config.name).await? {
@@ -66,6 +67,7 @@ impl ClusterProvider for MinikubeProvider {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(cluster_name = %name, provider = "minikube"))]
     async fn delete(&self, name: &str) -> Result<(), ProviderError> {
         info!("Deleting Minikube cluster: {}", name);
 
@@ -84,6 +86,7 @@ impl ClusterProvider for MinikubeProvider {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(cluster_name = %cluster, image = %image, provider = "minikube"))]
     async fn load_image(&self, cluster: &str, image: &str) -> Result<(), ProviderError> {
         debug!("Loading image {} into cluster {}", image, cluster);
 

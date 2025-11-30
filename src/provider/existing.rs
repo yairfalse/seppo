@@ -3,7 +3,7 @@
 //! Uses an existing Kubernetes cluster (no lifecycle management).
 
 use async_trait::async_trait;
-use log::{debug, info};
+use tracing::{debug, info, instrument};
 
 use super::{ClusterProvider, ProviderError};
 use crate::config::ClusterConfig;
@@ -28,6 +28,7 @@ impl Default for ExistingProvider {
 
 #[async_trait]
 impl ClusterProvider for ExistingProvider {
+    #[instrument(skip(self), fields(cluster_name = %config.name, provider = "existing"))]
     async fn create(&self, config: &ClusterConfig) -> Result<(), ProviderError> {
         // No-op for existing clusters - just verify it exists
         info!("Using existing cluster: {}", config.name);
@@ -42,12 +43,14 @@ impl ClusterProvider for ExistingProvider {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(cluster_name = %name, provider = "existing"))]
     async fn delete(&self, name: &str) -> Result<(), ProviderError> {
         // No-op for existing clusters - we don't delete clusters we didn't create
         debug!("Skipping delete for existing cluster: {} (not managed by Seppo)", name);
         Ok(())
     }
 
+    #[instrument(skip(self), fields(cluster_name = %_cluster, image = %_image, provider = "existing"))]
     async fn load_image(&self, _cluster: &str, _image: &str) -> Result<(), ProviderError> {
         // Cannot load images into remote/existing clusters
         // User must push to a registry that the cluster can pull from

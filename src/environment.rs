@@ -7,9 +7,9 @@
 //! - Run setup scripts
 //! - Export environment variables
 
-use log::info;
 use std::path::Path;
 use std::process::Command;
+use tracing::{info, instrument};
 
 use crate::config::{Config, WaitCondition};
 use crate::provider::get_provider;
@@ -60,6 +60,7 @@ pub enum EnvironmentError {
 /// 3. Apply K8s manifests
 /// 4. Wait for readiness conditions
 /// 5. Run setup script (if configured)
+#[instrument(skip(config), fields(cluster_name = %config.cluster.name))]
 pub async fn setup(config: &Config) -> Result<SetupResult, EnvironmentError> {
     let mut result = SetupResult::default();
 
