@@ -22,7 +22,7 @@
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use std::time::Duration;
@@ -209,8 +209,12 @@ fn init_meter_provider(
         .build()
         .map_err(|e| TelemetryError::MeterInit(e.to_string()))?;
 
+    let reader = PeriodicReader::builder(exporter)
+        .with_interval(config.metric_interval)
+        .build();
+
     let provider = SdkMeterProvider::builder()
-        .with_periodic_exporter(exporter)
+        .with_reader(reader)
         .with_resource(resource)
         .build();
 
