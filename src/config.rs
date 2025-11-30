@@ -1,37 +1,39 @@
-//! Configuration parsing for seppo.yaml
+//! Configuration types for Seppo
 //!
-//! Defines the structure of test environment configuration.
+//! These types define cluster and environment configuration.
+//! Build them programmatically - no config files needed.
+//!
+//! # Example
+//!
+//! ```
+//! use seppo::config::{ClusterConfig, EnvironmentConfig, WaitCondition};
+//!
+//! let cluster = ClusterConfig::kind("my-test")
+//!     .workers(2)
+//!     .k8s_version("1.31.0");
+//!
+//! let env = EnvironmentConfig::new()
+//!     .image("myapp:test")
+//!     .manifest("./k8s/deployment.yaml")
+//!     .wait(WaitCondition::available("deployment/myapp"));
+//! ```
 
-use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
-
-/// Main configuration for Seppo test environment
-#[derive(Debug, Clone, Deserialize)]
-pub struct Config {
-    /// Cluster configuration
-    pub cluster: ClusterConfig,
-
-    /// Environment setup configuration
-    #[serde(default)]
-    pub environment: EnvironmentConfig,
-}
+use std::time::Duration;
 
 /// Cluster configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ClusterConfig {
-    /// Cluster name (required)
+    /// Cluster name
     pub name: String,
 
-    /// Cluster provider (default: kind)
-    #[serde(default)]
+    /// Cluster provider
     pub provider: ClusterProviderType,
 
-    /// Number of worker nodes (default: 2)
-    #[serde(default = "default_workers")]
+    /// Number of worker nodes
     pub workers: u32,
 
-    /// Kubernetes version (optional, uses provider default)
+    /// Kubernetes version
     pub k8s_version: Option<String>,
 
     /// Minikube driver (docker, hyperkit, virtualbox)
@@ -44,9 +46,79 @@ pub struct ClusterConfig {
     pub context: Option<String>,
 }
 
+impl ClusterConfig {
+    /// Create a Kind cluster config
+    pub fn kind(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            provider: ClusterProviderType::Kind,
+            workers: 2,
+            k8s_version: None,
+            driver: None,
+            kubeconfig: None,
+            context: None,
+        }
+    }
+
+    /// Create a Minikube cluster config
+    pub fn minikube(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            provider: ClusterProviderType::Minikube,
+            workers: 2,
+            k8s_version: None,
+            driver: Some("docker".to_string()),
+            kubeconfig: None,
+            context: None,
+        }
+    }
+
+    /// Use an existing cluster
+    pub fn existing(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            provider: ClusterProviderType::Existing,
+            workers: 0,
+            k8s_version: None,
+            driver: None,
+            kubeconfig: None,
+            context: None,
+        }
+    }
+
+    /// Set number of worker nodes
+    pub fn workers(mut self, workers: u32) -> Self {
+        self.workers = workers;
+        self
+    }
+
+    /// Set Kubernetes version
+    pub fn k8s_version(mut self, version: impl Into<String>) -> Self {
+        self.k8s_version = Some(version.into());
+        self
+    }
+
+    /// Set Minikube driver
+    pub fn driver(mut self, driver: impl Into<String>) -> Self {
+        self.driver = Some(driver.into());
+        self
+    }
+
+    /// Set kubeconfig path (for existing clusters)
+    pub fn kubeconfig(mut self, path: impl Into<String>) -> Self {
+        self.kubeconfig = Some(path.into());
+        self
+    }
+
+    /// Set kubectl context (for existing clusters)
+    pub fn context(mut self, context: impl Into<String>) -> Self {
+        self.context = Some(context.into());
+        self
+    }
+}
+
 /// Cluster provider type
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ClusterProviderType {
     #[default]
     Kind,
@@ -54,35 +126,76 @@ pub enum ClusterProviderType {
     Existing,
 }
 
-fn default_workers() -> u32 {
-    2
-}
-
 /// Environment setup configuration
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct EnvironmentConfig {
     /// Docker images to load into cluster
-    #[serde(default)]
     pub images: Vec<String>,
 
     /// K8s manifests to apply (in order)
-    #[serde(default)]
     pub manifests: Vec<String>,
 
     /// Wait conditions before running tests
-    #[serde(default)]
     pub wait: Vec<WaitCondition>,
 
     /// Optional setup script to run after manifests
     pub setup_script: Option<String>,
 
     /// Environment variables to export for tests
-    #[serde(default)]
     pub env: HashMap<String, String>,
 }
 
+impl EnvironmentConfig {
+    /// Create new empty environment config
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a Docker image to load
+    pub fn image(mut self, image: impl Into<String>) -> Self {
+        self.images.push(image.into());
+        self
+    }
+
+    /// Add multiple Docker images
+    pub fn images(mut self, images: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.images.extend(images.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a manifest to apply
+    pub fn manifest(mut self, path: impl Into<String>) -> Self {
+        self.manifests.push(path.into());
+        self
+    }
+
+    /// Add multiple manifests
+    pub fn manifests(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.manifests.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a wait condition
+    pub fn wait(mut self, condition: WaitCondition) -> Self {
+        self.wait.push(condition);
+        self
+    }
+
+    /// Set setup script path
+    pub fn setup_script(mut self, path: impl Into<String>) -> Self {
+        self.setup_script = Some(path.into());
+        self
+    }
+
+    /// Add an environment variable
+    pub fn env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
+    }
+}
+
 /// Wait condition for resource readiness
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WaitCondition {
     /// Condition type (available, ready, programmed, etc.)
     pub condition: String,
@@ -90,71 +203,116 @@ pub struct WaitCondition {
     /// Resource to wait for (e.g., deployment/test-backend)
     pub resource: String,
 
-    /// Namespace (optional, defaults to "default")
-    pub namespace: Option<String>,
+    /// Namespace
+    pub namespace: String,
 
-    /// Timeout (e.g., "120s")
-    #[serde(default = "default_timeout")]
-    pub timeout: String,
+    /// Timeout
+    pub timeout: Duration,
 
-    /// Number of replicas to wait for (optional)
+    /// Number of replicas to wait for
     pub replicas: Option<u32>,
 
-    /// Label selector (optional)
+    /// Label selector
     pub selector: Option<String>,
 }
 
-fn default_timeout() -> String {
-    "60s".to_string()
+impl WaitCondition {
+    /// Wait for resource to be available
+    pub fn available(resource: impl Into<String>) -> Self {
+        Self {
+            condition: "available".to_string(),
+            resource: resource.into(),
+            namespace: "default".to_string(),
+            timeout: Duration::from_secs(60),
+            replicas: None,
+            selector: None,
+        }
+    }
+
+    /// Wait for resource to be ready
+    pub fn ready(resource: impl Into<String>) -> Self {
+        Self {
+            condition: "ready".to_string(),
+            resource: resource.into(),
+            namespace: "default".to_string(),
+            timeout: Duration::from_secs(60),
+            replicas: None,
+            selector: None,
+        }
+    }
+
+    /// Wait for custom condition
+    pub fn condition(condition: impl Into<String>, resource: impl Into<String>) -> Self {
+        Self {
+            condition: condition.into(),
+            resource: resource.into(),
+            namespace: "default".to_string(),
+            timeout: Duration::from_secs(60),
+            replicas: None,
+            selector: None,
+        }
+    }
+
+    /// Set namespace
+    pub fn namespace(mut self, ns: impl Into<String>) -> Self {
+        self.namespace = ns.into();
+        self
+    }
+
+    /// Set timeout
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Set timeout in seconds
+    pub fn timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout = Duration::from_secs(secs);
+        self
+    }
+
+    /// Set replicas to wait for
+    pub fn replicas(mut self, count: u32) -> Self {
+        self.replicas = Some(count);
+        self
+    }
+
+    /// Set label selector
+    pub fn selector(mut self, selector: impl Into<String>) -> Self {
+        self.selector = Some(selector.into());
+        self
+    }
+
+    /// Get timeout as string for kubectl (e.g., "60s")
+    pub fn timeout_str(&self) -> String {
+        format!("{}s", self.timeout.as_secs())
+    }
+}
+
+/// Full test configuration (cluster + environment)
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Cluster configuration
+    pub cluster: ClusterConfig,
+
+    /// Environment setup configuration
+    pub environment: EnvironmentConfig,
 }
 
 impl Config {
-    /// Parse config from YAML string
-    pub fn parse(yaml: &str) -> Result<Self, ConfigError> {
-        if yaml.trim().is_empty() {
-            return Err(ConfigError::Empty);
+    /// Create config with cluster and default environment
+    pub fn new(cluster: ClusterConfig) -> Self {
+        Self {
+            cluster,
+            environment: EnvironmentConfig::new(),
         }
-
-        serde_yaml::from_str(yaml).map_err(|e| ConfigError::ParseError(e.to_string()))
     }
 
-    /// Parse config from file path
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let path = path.as_ref();
-
-        if !path.exists() {
-            return Err(ConfigError::NotFound(path.display().to_string()));
-        }
-
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::ReadError(e.to_string()))?;
-
-        Self::parse(&content)
+    /// Set environment configuration
+    pub fn environment(mut self, env: EnvironmentConfig) -> Self {
+        self.environment = env;
+        self
     }
-}
-
-impl std::str::FromStr for Config {
-    type Err = ConfigError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s)
-    }
-}
-
-/// Configuration errors
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error("Config file not found: {0}")]
-    NotFound(String),
-
-    #[error("Failed to read config: {0}")]
-    ReadError(String),
-
-    #[error("Failed to parse config: {0}")]
-    ParseError(String),
-
-    #[error("Config is empty")]
-    Empty,
 }
 
 #[cfg(test)]
@@ -162,112 +320,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_minimal_config() {
-        let yaml = r#"
-cluster:
-  name: test-cluster
-"#;
+    fn test_cluster_config_kind() {
+        let config = ClusterConfig::kind("test").workers(3).k8s_version("1.31.0");
 
-        let config: Config = yaml.parse().expect("Should parse minimal config");
-
-        assert_eq!(config.cluster.name, "test-cluster");
-        assert_eq!(config.cluster.workers, 2); // default
+        assert_eq!(config.name, "test");
+        assert_eq!(config.provider, ClusterProviderType::Kind);
+        assert_eq!(config.workers, 3);
+        assert_eq!(config.k8s_version, Some("1.31.0".to_string()));
     }
 
     #[test]
-    fn test_parse_full_config() {
-        let yaml = r#"
-cluster:
-  name: rauta-test
-  workers: 3
-  k8s_version: "1.31.0"
+    fn test_cluster_config_minikube() {
+        let config = ClusterConfig::minikube("test").driver("hyperkit");
 
-environment:
-  images:
-    - rauta:test
-    - backend:latest
-
-  manifests:
-    - ./test/fixtures/namespace.yaml
-    - ./test/fixtures/deployment.yaml
-
-  wait:
-    - condition: available
-      resource: deployment/test-backend
-      namespace: test
-      timeout: 120s
-
-  setup_script: ./scripts/setup.sh
-
-  env:
-    TEST_URL: "http://localhost:8080"
-"#;
-
-        let config: Config = yaml.parse().expect("Should parse full config");
-
-        // Cluster
-        assert_eq!(config.cluster.name, "rauta-test");
-        assert_eq!(config.cluster.workers, 3);
-        assert_eq!(config.cluster.k8s_version, Some("1.31.0".to_string()));
-
-        // Environment - images
-        assert_eq!(config.environment.images.len(), 2);
-        assert_eq!(config.environment.images[0], "rauta:test");
-
-        // Environment - manifests
-        assert_eq!(config.environment.manifests.len(), 2);
-        assert_eq!(config.environment.manifests[0], "./test/fixtures/namespace.yaml");
-
-        // Environment - wait conditions
-        assert_eq!(config.environment.wait.len(), 1);
-        assert_eq!(config.environment.wait[0].condition, "available");
-        assert_eq!(config.environment.wait[0].resource, "deployment/test-backend");
-        assert_eq!(config.environment.wait[0].namespace, Some("test".to_string()));
-        assert_eq!(config.environment.wait[0].timeout, "120s");
-
-        // Environment - setup script
-        assert_eq!(config.environment.setup_script, Some("./scripts/setup.sh".to_string()));
-
-        // Environment - env vars
-        assert_eq!(config.environment.env.get("TEST_URL"), Some(&"http://localhost:8080".to_string()));
+        assert_eq!(config.provider, ClusterProviderType::Minikube);
+        assert_eq!(config.driver, Some("hyperkit".to_string()));
     }
 
     #[test]
-    fn test_parse_config_from_file() {
-        // Create a temp file
-        let temp_dir = std::env::temp_dir();
-        let config_path = temp_dir.join("test-seppo.yaml");
+    fn test_cluster_config_existing() {
+        let config = ClusterConfig::existing("prod")
+            .kubeconfig("~/.kube/prod")
+            .context("prod-context");
 
-        std::fs::write(&config_path, r#"
-cluster:
-  name: file-test
-  workers: 1
-"#).expect("Should write temp file");
-
-        let config = Config::from_file(&config_path).expect("Should parse from file");
-
-        assert_eq!(config.cluster.name, "file-test");
-        assert_eq!(config.cluster.workers, 1);
-
-        // Cleanup
-        std::fs::remove_file(&config_path).ok();
+        assert_eq!(config.provider, ClusterProviderType::Existing);
+        assert_eq!(config.kubeconfig, Some("~/.kube/prod".to_string()));
+        assert_eq!(config.context, Some("prod-context".to_string()));
     }
 
     #[test]
-    fn test_parse_config_missing_cluster_name_fails() {
-        let yaml = r#"
-cluster:
-  workers: 2
-"#;
+    fn test_environment_config() {
+        let env = EnvironmentConfig::new()
+            .image("app:test")
+            .image("sidecar:latest")
+            .manifest("./k8s/ns.yaml")
+            .manifest("./k8s/deploy.yaml")
+            .wait(WaitCondition::available("deployment/app").namespace("test"))
+            .setup_script("./setup.sh")
+            .env_var("DEBUG", "true");
 
-        let result: Result<Config, _> = yaml.parse();
-        assert!(result.is_err(), "Should fail without cluster name");
+        assert_eq!(env.images.len(), 2);
+        assert_eq!(env.manifests.len(), 2);
+        assert_eq!(env.wait.len(), 1);
+        assert_eq!(env.setup_script, Some("./setup.sh".to_string()));
+        assert_eq!(env.env.get("DEBUG"), Some(&"true".to_string()));
     }
 
     #[test]
-    fn test_parse_config_empty_fails() {
-        let yaml = "";
-        let result: Result<Config, _> = yaml.parse();
-        assert!(result.is_err(), "Should fail on empty config");
+    fn test_wait_condition() {
+        let cond = WaitCondition::available("deployment/myapp")
+            .namespace("test")
+            .timeout_secs(120);
+
+        assert_eq!(cond.condition, "available");
+        assert_eq!(cond.resource, "deployment/myapp");
+        assert_eq!(cond.namespace, "test");
+        assert_eq!(cond.timeout, Duration::from_secs(120));
+        assert_eq!(cond.timeout_str(), "120s");
+    }
+
+    #[test]
+    fn test_full_config() {
+        let config = Config::new(ClusterConfig::kind("test").workers(2)).environment(
+            EnvironmentConfig::new()
+                .image("app:test")
+                .manifest("./k8s/deploy.yaml"),
+        );
+
+        assert_eq!(config.cluster.name, "test");
+        assert_eq!(config.environment.images.len(), 1);
     }
 }

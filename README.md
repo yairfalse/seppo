@@ -1,11 +1,11 @@
 # Seppo
 
-Kubernetes test orchestrator. Create clusters, setup environments, run tests.
+Kubernetes testing SDK. Native library, no config files.
 
 ## What it does
 
 ```
-seppo.yaml -> Cluster -> Environment -> Tests -> Results
+Code -> Cluster -> Environment -> Tests -> Results
 ```
 
 1. **Cluster**: Create Kind/Minikube or use existing
@@ -15,8 +15,6 @@ seppo.yaml -> Cluster -> Environment -> Tests -> Results
 
 ## Quick Start
 
-### Rust Library
-
 ```toml
 [dev-dependencies]
 seppo = "0.1"
@@ -24,45 +22,30 @@ tokio = { version = "1", features = ["full"] }
 ```
 
 ```rust
-use seppo::{Config, setup, run};
+use seppo::{ClusterConfig, EnvironmentConfig, WaitCondition, Config, setup};
 
 #[tokio::test]
 async fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
-    // Load config
-    let config: Config = std::fs::read_to_string("seppo.yaml")?.parse()?;
+    // Define cluster
+    let cluster = ClusterConfig::kind("my-test")
+        .workers(2);
 
-    // Setup cluster + environment
+    // Define environment
+    let env = EnvironmentConfig::new()
+        .image("myapp:test")
+        .manifest("./k8s/deployment.yaml")
+        .wait(WaitCondition::available("deployment/myapp"));
+
+    // Setup
+    let config = Config::new(cluster).environment(env);
     setup(&config).await?;
 
     // Run tests
-    let result = run("cargo", &["test", "--", "--ignored"]).await?;
-
+    let result = seppo::run("cargo", &["test", "--", "--ignored"]).await?;
     assert!(result.passed());
+
     Ok(())
 }
-```
-
-### Configuration (seppo.yaml)
-
-```yaml
-cluster:
-  name: my-test
-  provider: kind        # kind | minikube | existing
-  workers: 2
-
-environment:
-  images:
-    - myapp:test
-    - sidecar:latest
-  manifests:
-    - ./k8s/namespace.yaml
-    - ./k8s/deployment.yaml
-  wait:
-    - condition: available
-      resource: deployment/myapp
-      namespace: default
-      timeout: 120s
-  setup_script: ./scripts/setup.sh
 ```
 
 ## Providers
@@ -75,41 +58,34 @@ environment:
 
 ### Kind (default)
 
-```yaml
-cluster:
-  name: test
-  provider: kind
-  workers: 2
-  k8s_version: "1.31.0"  # optional
+```rust
+let cluster = ClusterConfig::kind("test")
+    .workers(2)
+    .k8s_version("1.31.0");
 ```
 
 ### Minikube
 
-```yaml
-cluster:
-  name: test
-  provider: minikube
-  driver: docker  # or hyperkit, virtualbox
+```rust
+let cluster = ClusterConfig::minikube("test")
+    .driver("docker");  // or hyperkit, virtualbox
 ```
 
 ### Existing Cluster
 
-```yaml
-cluster:
-  name: my-cluster
-  provider: existing
-  kubeconfig: ~/.kube/config
-  context: my-context
+```rust
+let cluster = ClusterConfig::existing("my-cluster")
+    .kubeconfig("~/.kube/config")
+    .context("my-context");
 ```
 
 ## API
 
-### Cluster Operations
+### Simple API (Kind only)
 
 ```rust
 use seppo::cluster;
 
-// Simple API (Kind only)
 cluster::create("test").await?;
 cluster::load_image("test", "myapp:v1").await?;
 cluster::delete("test").await?;
@@ -118,12 +94,12 @@ cluster::delete("test").await?;
 ### Multi-Provider
 
 ```rust
-use seppo::{Config, get_provider};
+use seppo::{ClusterConfig, get_provider};
 
-let config: Config = yaml.parse()?;
-let provider = get_provider(&config.cluster)?;
+let config = ClusterConfig::kind("test").workers(2);
+let provider = get_provider(&config)?;
 
-provider.create(&config.cluster).await?;
+provider.create(&config).await?;
 provider.load_image("test", "myapp:v1").await?;
 provider.delete("test").await?;
 ```
@@ -131,11 +107,23 @@ provider.delete("test").await?;
 ### Environment Setup
 
 ```rust
-use seppo::{Config, setup};
+use seppo::{ClusterConfig, EnvironmentConfig, WaitCondition, Config, setup};
 
-let config: Config = yaml.parse()?;
+let config = Config::new(ClusterConfig::kind("test"))
+    .environment(
+        EnvironmentConfig::new()
+            .image("myapp:test")
+            .manifest("./k8s/namespace.yaml")
+            .manifest("./k8s/deployment.yaml")
+            .wait(
+                WaitCondition::available("deployment/myapp")
+                    .namespace("test")
+                    .timeout_secs(120)
+            )
+            .setup_script("./scripts/setup.sh")
+    );
+
 let result = setup(&config).await?;
-
 println!("Images loaded: {:?}", result.images_loaded);
 println!("Manifests applied: {:?}", result.manifests_applied);
 ```
@@ -144,6 +132,7 @@ println!("Manifests applied: {:?}", result.manifests_applied);
 
 ```rust
 use seppo::{run, run_with_env};
+use std::collections::HashMap;
 
 // Run command
 let result = run("pytest", &["-v", "tests/"]).await?;

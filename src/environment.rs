@@ -84,10 +84,9 @@ pub async fn setup(config: &Config) -> Result<SetupResult, EnvironmentError> {
     // 4. Wait for conditions
     for wait in &config.environment.wait {
         wait_for_condition(wait).await?;
-        result.wait_conditions_met.push(format!(
-            "{}/{}",
-            wait.condition, wait.resource
-        ));
+        result
+            .wait_conditions_met
+            .push(format!("{}/{}", wait.condition, wait.resource));
     }
 
     // 5. Run setup script
@@ -125,9 +124,10 @@ async fn apply_manifest(path: &str) -> Result<(), EnvironmentError> {
 
 /// Wait for a K8s resource condition using kubectl wait
 async fn wait_for_condition(wait: &WaitCondition) -> Result<(), EnvironmentError> {
+    let timeout_str = wait.timeout_str();
     info!(
         "Waiting for {} on {} (timeout: {})",
-        wait.condition, wait.resource, wait.timeout
+        wait.condition, wait.resource, timeout_str
     );
 
     let mut cmd = Command::new("kubectl");
@@ -135,13 +135,11 @@ async fn wait_for_condition(wait: &WaitCondition) -> Result<(), EnvironmentError
         "wait",
         &format!("--for=condition={}", wait.condition),
         &wait.resource,
-        &format!("--timeout={}", wait.timeout),
+        &format!("--timeout={}", timeout_str),
     ]);
 
-    // Add namespace if specified
-    if let Some(ref ns) = wait.namespace {
-        cmd.args(["-n", ns]);
-    }
+    // Add namespace
+    cmd.args(["-n", &wait.namespace]);
 
     // Add selector if specified
     if let Some(ref selector) = wait.selector {
@@ -155,7 +153,7 @@ async fn wait_for_condition(wait: &WaitCondition) -> Result<(), EnvironmentError
     if !output.status.success() {
         return Err(EnvironmentError::WaitTimeout {
             resource: wait.resource.clone(),
-            timeout: wait.timeout.clone(),
+            timeout: timeout_str,
         });
     }
 
@@ -188,7 +186,7 @@ async fn run_setup_script(path: &str) -> Result<(), EnvironmentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{ClusterConfig, Config, EnvironmentConfig, WaitCondition};
 
     #[test]
     fn test_setup_result_default() {
@@ -200,63 +198,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_loads_images() {
-        let yaml = r#"
-cluster:
-  name: env-test
-  provider: kind
+        let config = Config::new(ClusterConfig::kind("env-test")).environment(
+            EnvironmentConfig::new()
+                .image("myapp:test")
+                .image("backend:latest"),
+        );
 
-environment:
-  images:
-    - myapp:test
-    - backend:latest
-"#;
-        let config: Config = yaml.parse().unwrap();
-
-        // This should fail - setup() doesn't exist yet
+        // This will fail without a real cluster, but tests the API
         let result = setup(&config).await;
-
-        // We can't actually test image loading without a cluster,
-        // but we can verify the function exists and returns correct type
         assert!(result.is_ok() || result.is_err());
     }
 
     #[tokio::test]
     async fn test_setup_applies_manifests() {
-        let yaml = r#"
-cluster:
-  name: manifest-test
-  provider: existing
-  kubeconfig: ~/.kube/config
+        let config =
+            Config::new(ClusterConfig::existing("manifest-test").kubeconfig("~/.kube/config"))
+                .environment(
+                    EnvironmentConfig::new()
+                        .manifest("./test/fixtures/namespace.yaml")
+                        .manifest("./test/fixtures/deployment.yaml"),
+                );
 
-environment:
-  manifests:
-    - ./test/fixtures/namespace.yaml
-    - ./test/fixtures/deployment.yaml
-"#;
-        let config: Config = yaml.parse().unwrap();
-
-        // setup() should exist and handle manifests
         let result = setup(&config).await;
         assert!(result.is_ok() || result.is_err());
     }
 
     #[tokio::test]
     async fn test_setup_with_wait_conditions() {
-        let yaml = r#"
-cluster:
-  name: wait-test
-  provider: existing
-
-environment:
-  manifests:
-    - ./test/fixtures/deployment.yaml
-  wait:
-    - condition: available
-      resource: deployment/test-app
-      namespace: default
-      timeout: 60s
-"#;
-        let config: Config = yaml.parse().unwrap();
+        let config = Config::new(ClusterConfig::existing("wait-test")).environment(
+            EnvironmentConfig::new()
+                .manifest("./test/fixtures/deployment.yaml")
+                .wait(WaitCondition::available("deployment/test-app").timeout_secs(60)),
+        );
 
         let result = setup(&config).await;
         assert!(result.is_ok() || result.is_err());
@@ -264,15 +237,8 @@ environment:
 
     #[tokio::test]
     async fn test_setup_with_setup_script() {
-        let yaml = r#"
-cluster:
-  name: script-test
-  provider: existing
-
-environment:
-  setup_script: ./scripts/setup.sh
-"#;
-        let config: Config = yaml.parse().unwrap();
+        let config = Config::new(ClusterConfig::existing("script-test"))
+            .environment(EnvironmentConfig::new().setup_script("./scripts/setup.sh"));
 
         let result = setup(&config).await;
         assert!(result.is_ok() || result.is_err());
@@ -280,12 +246,7 @@ environment:
 
     #[tokio::test]
     async fn test_setup_empty_environment() {
-        let yaml = r#"
-cluster:
-  name: empty-env-test
-  provider: existing
-"#;
-        let config: Config = yaml.parse().unwrap();
+        let config = Config::new(ClusterConfig::existing("empty-env-test"));
 
         // Empty environment should succeed (no-op)
         let result = setup(&config).await;

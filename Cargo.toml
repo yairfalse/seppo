@@ -29,16 +29,14 @@ k8s-openapi = { version = "0.25", features = ["v1_31"] }
 thiserror = "1.0"
 anyhow = "1.0"
 
-# Serialization
+# Serialization (for JSON APIs, not config files)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
 
 # Utilities
 futures = "0.3"
 
 # Logging & Telemetry
-log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = "0.30"
