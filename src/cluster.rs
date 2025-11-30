@@ -6,6 +6,7 @@
 //! **Note**: This module uses `KindProvider` internally. For multi-provider
 //! support (Kind, Minikube, Existing), use `seppo::provider::get_provider()`.
 
+use log::info;
 use std::process::Command;
 
 use crate::config::{ClusterConfig, ClusterProviderType};
@@ -80,7 +81,7 @@ pub async fn exists(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
 ///
 /// This is optional but useful for testing Gateway API controllers.
 async fn install_gateway_api_crds() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Installing Gateway API CRDs");
+    info!("Installing Gateway API CRDs");
 
     let output = Command::new("kubectl")
         .args([

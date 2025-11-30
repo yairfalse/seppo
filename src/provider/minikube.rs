@@ -3,6 +3,7 @@
 //! Creates and manages Minikube clusters.
 
 use async_trait::async_trait;
+use log::{debug, info};
 use std::process::Command;
 
 use super::{ClusterProvider, ProviderError};
@@ -28,11 +29,11 @@ impl ClusterProvider for MinikubeProvider {
     async fn create(&self, config: &ClusterConfig) -> Result<(), ProviderError> {
         // Check if cluster already exists
         if self.exists(&config.name).await? {
-            println!("Cluster {} already exists, reusing", config.name);
+            debug!("Cluster {} already exists, reusing", config.name);
             return Ok(());
         }
 
-        println!("Creating Minikube cluster: {}", config.name);
+        info!("Creating Minikube cluster: {}", config.name);
 
         let mut cmd = Command::new("minikube");
         cmd.args(["start", "--profile", &config.name]);
@@ -61,12 +62,12 @@ impl ClusterProvider for MinikubeProvider {
             ));
         }
 
-        println!("Cluster {} created successfully", config.name);
+        info!("Cluster {} created successfully", config.name);
         Ok(())
     }
 
     async fn delete(&self, name: &str) -> Result<(), ProviderError> {
-        println!("Deleting Minikube cluster: {}", name);
+        info!("Deleting Minikube cluster: {}", name);
 
         let output = Command::new("minikube")
             .args(["delete", "--profile", name])
@@ -79,12 +80,12 @@ impl ClusterProvider for MinikubeProvider {
             ));
         }
 
-        println!("Cluster {} deleted", name);
+        debug!("Cluster {} deleted", name);
         Ok(())
     }
 
     async fn load_image(&self, cluster: &str, image: &str) -> Result<(), ProviderError> {
-        println!("Loading image {} into cluster {}", image, cluster);
+        debug!("Loading image {} into cluster {}", image, cluster);
 
         let output = Command::new("minikube")
             .args(["image", "load", image, "--profile", cluster])

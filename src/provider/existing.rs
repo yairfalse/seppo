@@ -3,6 +3,7 @@
 //! Uses an existing Kubernetes cluster (no lifecycle management).
 
 use async_trait::async_trait;
+use log::{debug, info};
 
 use super::{ClusterProvider, ProviderError};
 use crate::config::ClusterConfig;
@@ -29,7 +30,7 @@ impl Default for ExistingProvider {
 impl ClusterProvider for ExistingProvider {
     async fn create(&self, config: &ClusterConfig) -> Result<(), ProviderError> {
         // No-op for existing clusters - just verify it exists
-        println!("Using existing cluster: {}", config.name);
+        info!("Using existing cluster: {}", config.name);
 
         if !self.exists(&config.name).await? {
             return Err(ProviderError::CreateFailed(format!(
@@ -43,7 +44,7 @@ impl ClusterProvider for ExistingProvider {
 
     async fn delete(&self, name: &str) -> Result<(), ProviderError> {
         // No-op for existing clusters - we don't delete clusters we didn't create
-        println!("Skipping delete for existing cluster: {} (not managed by Seppo)", name);
+        debug!("Skipping delete for existing cluster: {} (not managed by Seppo)", name);
         Ok(())
     }
 

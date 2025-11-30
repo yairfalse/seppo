@@ -3,6 +3,7 @@
 //! Creates and manages Kind (Kubernetes in Docker) clusters.
 
 use async_trait::async_trait;
+use log::{debug, info};
 use std::process::Command;
 
 use super::{ClusterProvider, ProviderError};
@@ -28,11 +29,11 @@ impl ClusterProvider for KindProvider {
     async fn create(&self, config: &ClusterConfig) -> Result<(), ProviderError> {
         // Check if cluster already exists
         if self.exists(&config.name).await? {
-            println!("Cluster {} already exists, reusing", config.name);
+            debug!("Cluster {} already exists, reusing", config.name);
             return Ok(());
         }
 
-        println!("Creating Kind cluster: {}", config.name);
+        info!("Creating Kind cluster: {}", config.name);
 
         // Generate Kind config
         let worker_nodes: String = (0..config.workers)
@@ -74,12 +75,12 @@ nodes:
             ));
         }
 
-        println!("Cluster {} created successfully", config.name);
+        info!("Cluster {} created successfully", config.name);
         Ok(())
     }
 
     async fn delete(&self, name: &str) -> Result<(), ProviderError> {
-        println!("Deleting Kind cluster: {}", name);
+        info!("Deleting Kind cluster: {}", name);
 
         let output = Command::new("kind")
             .args(["delete", "cluster", "--name", name])
@@ -92,12 +93,12 @@ nodes:
             ));
         }
 
-        println!("Cluster {} deleted", name);
+        debug!("Cluster {} deleted", name);
         Ok(())
     }
 
     async fn load_image(&self, cluster: &str, image: &str) -> Result<(), ProviderError> {
-        println!("Loading image {} into cluster {}", image, cluster);
+        debug!("Loading image {} into cluster {}", image, cluster);
 
         let output = Command::new("kind")
             .args(["load", "docker-image", image, "--name", cluster])

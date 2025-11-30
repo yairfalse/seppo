@@ -7,6 +7,7 @@
 //! - Run setup scripts
 //! - Export environment variables
 
+use log::info;
 use std::path::Path;
 use std::process::Command;
 
@@ -68,7 +69,7 @@ pub async fn setup(config: &Config) -> Result<SetupResult, EnvironmentError> {
 
     // 2. Load images
     for image in &config.environment.images {
-        println!("Loading image: {}", image);
+        info!("Loading image: {}", image);
         provider.load_image(&config.cluster.name, image).await?;
         result.images_loaded.push(image.clone());
     }
@@ -104,7 +105,7 @@ async fn apply_manifest(path: &str) -> Result<(), EnvironmentError> {
         return Err(EnvironmentError::ManifestNotFound(path.to_string()));
     }
 
-    println!("Applying manifest: {}", path);
+    info!("Applying manifest: {}", path);
 
     let output = Command::new("kubectl")
         .args(["apply", "-f", path])
@@ -123,7 +124,7 @@ async fn apply_manifest(path: &str) -> Result<(), EnvironmentError> {
 
 /// Wait for a K8s resource condition using kubectl wait
 async fn wait_for_condition(wait: &WaitCondition) -> Result<(), EnvironmentError> {
-    println!(
+    info!(
         "Waiting for {} on {} (timeout: {})",
         wait.condition, wait.resource, wait.timeout
     );
@@ -167,10 +168,10 @@ async fn run_setup_script(path: &str) -> Result<(), EnvironmentError> {
         return Err(EnvironmentError::SetupScriptNotFound(path.to_string()));
     }
 
-    println!("Running setup script: {}", path);
+    info!("Running setup script: {}", path);
 
     let output = Command::new("sh")
-        .args(["-c", path])
+        .arg(path)
         .output()
         .map_err(|e| EnvironmentError::CommandFailed(e.to_string()))?;
 

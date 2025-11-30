@@ -5,6 +5,7 @@
 //! - Capture stdout/stderr
 //! - Report exit code and pass/fail status
 
+use log::{debug, info};
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -62,7 +63,7 @@ pub async fn run_with_env(
     args: &[&str],
     env: &HashMap<String, String>,
 ) -> Result<RunResult, RunnerError> {
-    println!("Running: {} {}", program, args.join(" "));
+    info!("Running: {} {}", program, args.join(" "));
 
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -85,9 +86,9 @@ pub async fn run_with_env(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if exit_code == 0 {
-        println!("Command succeeded");
+        debug!("Command succeeded");
     } else {
-        println!("Command failed with exit code {}", exit_code);
+        debug!("Command failed with exit code {}", exit_code);
     }
 
     Ok(RunResult {
