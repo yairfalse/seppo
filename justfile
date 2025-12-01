@@ -68,22 +68,17 @@ diff:
   @echo "\n📦 Staged changes:"
   git diff --cached
 
-# === Seppo Usage (Test Runner) ===
+# === Seppo Usage (Native API) ===
 
-# Run Seppo test suite
-run-tests CONFIG:
-  @echo "🧪 Running Seppo tests: {{CONFIG}}"
-  cargo run -- run {{CONFIG}}
-
-# Validate test configuration
-validate CONFIG:
-  @echo "🔍 Validating config: {{CONFIG}}"
-  cargo run -- validate {{CONFIG}}
-
-# Run example test (if exists)
+# Run example test (native Rust API)
 example:
   @echo "🎬 Running example test..."
-  cargo run -- run examples/simple-test.yaml || echo "⚠️  No example test found"
+  cargo run --example simple || echo "⚠️  No example found (check examples/ directory)"
+
+# Run specific example
+run-example NAME:
+  @echo "🎬 Running example: {{NAME}}"
+  cargo run --example {{NAME}}
 
 # === Cleanup ===
 
