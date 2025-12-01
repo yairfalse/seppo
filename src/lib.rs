@@ -60,6 +60,7 @@
 
 pub mod cluster;
 pub mod config;
+pub mod context;
 pub mod environment;
 pub mod metrics;
 pub mod provider;
@@ -69,6 +70,7 @@ pub mod telemetry;
 // Re-export commonly used types
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
+pub use context::{ContextError, TestContext};
 pub use environment::{setup, EnvironmentError, SetupResult};
 pub use metrics::{metrics, SeppoMetrics};
 pub use provider::{
