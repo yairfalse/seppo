@@ -54,12 +54,13 @@ impl ClusterProvider for MinikubeProvider {
             cmd.args(["--nodes", &(config.workers + 1).to_string()]);
         }
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| ProviderError::CommandFailed(e.to_string()))?;
 
         if !output.status.success() {
             return Err(ProviderError::CreateFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
@@ -78,7 +79,7 @@ impl ClusterProvider for MinikubeProvider {
 
         if !output.status.success() {
             return Err(ProviderError::DeleteFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
@@ -97,7 +98,7 @@ impl ClusterProvider for MinikubeProvider {
 
         if !output.status.success() {
             return Err(ProviderError::ImageLoadFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 

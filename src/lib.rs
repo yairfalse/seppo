@@ -1,10 +1,36 @@
-//! Seppo - Kubernetes Testing Framework
+//! Seppo - Kubernetes Testing SDK
 //!
-//! Seppo provides cluster management and testing utilities for Kubernetes controllers
-//! and applications. Supports multiple cluster types (Kind, EKS, AKS, GKE) with a
-//! unified interface.
+//! A native Rust library for Kubernetes integration testing.
+//! No config files, just code.
 //!
-//! # Example (Rust)
+//! # Example
+//!
+//! ```no_run
+//! use seppo::{ClusterConfig, EnvironmentConfig, WaitCondition, Config, setup};
+//!
+//! #[tokio::test]
+//! async fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Define cluster
+//!     let cluster = ClusterConfig::kind("my-test")
+//!         .workers(2);
+//!
+//!     // Define environment
+//!     let env = EnvironmentConfig::new()
+//!         .image("myapp:test")
+//!         .manifest("./k8s/deployment.yaml")
+//!         .wait(WaitCondition::available("deployment/myapp"));
+//!
+//!     // Setup and run
+//!     let config = Config::new(cluster).environment(env);
+//!     setup(&config).await?;
+//!
+//!     // Your tests here...
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Quick Start
 //!
 //! ```no_run
 //! use seppo::cluster;
@@ -12,28 +38,25 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create Kind cluster
-//!     cluster::create("test-cluster").await?;
+//!     cluster::create("test").await?;
 //!
-//!     println!("Cluster created!");
+//!     // Load image
+//!     cluster::load_image("test", "myapp:v1").await?;
 //!
-//!     // Your tests here...
+//!     // Run your tests...
 //!
 //!     // Cleanup
-//!     cluster::delete("test-cluster").await?;
+//!     cluster::delete("test").await?;
 //!
 //!     Ok(())
 //! }
 //! ```
 //!
-//! # CLI Usage
+//! # Providers
 //!
-//! ```bash
-//! # Create cluster
-//! seppo cluster create --type kind --name test --nodes 2
-//!
-//! # Delete cluster
-//! seppo cluster delete --name test
-//! ```
+//! - **Kind** (default): Local Docker-based clusters
+//! - **Minikube**: Local VM-based clusters
+//! - **Existing**: Use pre-existing clusters
 
 pub mod cluster;
 pub mod config;
@@ -45,9 +68,11 @@ pub mod telemetry;
 
 // Re-export commonly used types
 pub use cluster::{create, delete, load_image};
-pub use config::{Config, ClusterConfig, ClusterProviderType, EnvironmentConfig, WaitCondition, ConfigError};
-pub use environment::{setup, SetupResult, EnvironmentError};
-pub use provider::{ClusterProvider, ProviderError, get_provider, KindProvider, MinikubeProvider, ExistingProvider};
+pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
+pub use environment::{setup, EnvironmentError, SetupResult};
+pub use metrics::{metrics, SeppoMetrics};
+pub use provider::{
+    get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
+};
 pub use runner::{run, run_with_env, RunResult, RunnerError};
 pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
-pub use metrics::{metrics, SeppoMetrics};

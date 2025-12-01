@@ -37,9 +37,7 @@ impl ClusterProvider for KindProvider {
         info!("Creating Kind cluster: {}", config.name);
 
         // Generate Kind config
-        let worker_nodes: String = (0..config.workers)
-            .map(|_| "- role: worker\n")
-            .collect();
+        let worker_nodes: String = (0..config.workers).map(|_| "- role: worker\n").collect();
 
         let kind_config = format!(
             r#"kind: Cluster
@@ -60,19 +58,27 @@ nodes:
 
         // Build command
         let mut cmd = Command::new("kind");
-        cmd.args(["create", "cluster", "--name", &config.name, "--config", config_path]);
+        cmd.args([
+            "create",
+            "cluster",
+            "--name",
+            &config.name,
+            "--config",
+            config_path,
+        ]);
 
         // Add K8s version if specified
         if let Some(ref version) = config.k8s_version {
             cmd.args(["--image", &format!("kindest/node:v{}", version)]);
         }
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| ProviderError::CommandFailed(e.to_string()))?;
 
         if !output.status.success() {
             return Err(ProviderError::CreateFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
@@ -91,7 +97,7 @@ nodes:
 
         if !output.status.success() {
             return Err(ProviderError::DeleteFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
@@ -110,7 +116,7 @@ nodes:
 
         if !output.status.success() {
             return Err(ProviderError::ImageLoadFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
@@ -135,7 +141,7 @@ nodes:
 
         if !output.status.success() {
             return Err(ProviderError::CommandFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 

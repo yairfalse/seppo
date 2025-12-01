@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Main CI job - just calls `just ci`
+  ci:
+    name: CI (just ci)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "seppo-ci"
+
+      # Install Just
+      - name: Install Just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+
+      # Install cargo-audit (for security checks)
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Run full CI (format, lint, test, audit, build)
+      - name: Run CI
+        run: just ci
+
+  # Status check for branch protection
+  status:
+    name: CI Status
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.ci.result }}" == "failure" ] || [ "${{ needs.ci.result }}" == "cancelled" ]; then
+            echo "❌ CI failed"
+            exit 1
+          fi
+          echo "✅ All checks passed"

@@ -68,22 +68,17 @@ diff:
   @echo "\n📦 Staged changes:"
   git diff --cached
 
-# === Seppo Usage (Test Runner) ===
+# === Seppo Usage (Native API) ===
 
-# Run Seppo test suite
-run-tests CONFIG:
-  @echo "🧪 Running Seppo tests: {{CONFIG}}"
-  cargo run -- run {{CONFIG}}
-
-# Validate test configuration
-validate CONFIG:
-  @echo "🔍 Validating config: {{CONFIG}}"
-  cargo run -- validate {{CONFIG}}
-
-# Run example test (if exists)
+# Run example test (native Rust API)
 example:
   @echo "🎬 Running example test..."
-  cargo run -- run examples/simple-test.yaml || echo "⚠️  No example test found"
+  cargo run --example simple || echo "⚠️  No example found (check examples/ directory)"
+
+# Run specific example
+run-example NAME:
+  @echo "🎬 Running example: {{NAME}}"
+  cargo run --example {{NAME}}
 
 # === Cleanup ===
 
@@ -100,6 +95,16 @@ setup:
   cargo install cargo-watch cargo-nextest cargo-audit
   brew install just kind kubectl
   @echo "✅ Setup complete!"
+
+# Install git hooks (pre-commit)
+install-hooks:
+  @echo "🔗 Installing git hooks..."
+  @if [ ! -f .git/hooks/pre-commit ]; then \
+    echo "⚠️  Pre-commit hook not found (expected in .git/hooks/pre-commit)"; \
+  else \
+    chmod +x .git/hooks/pre-commit && echo "✅ Pre-commit hook installed"; \
+  fi
+  @echo "✅ Hooks ready!"
 
 # === Git Shortcuts ===
 
