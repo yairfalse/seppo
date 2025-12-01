@@ -27,6 +27,12 @@ pub enum ContextError {
 
     #[error("Failed to cleanup namespace: {0}")]
     CleanupError(String),
+
+    #[error("Failed to apply resource: {0}")]
+    ApplyError(String),
+
+    #[error("Failed to get resource: {0}")]
+    GetError(String),
 }
 
 impl TestContext {
@@ -78,6 +84,58 @@ impl TestContext {
         info!(namespace = %self.namespace, "Deleted test namespace");
 
         Ok(())
+    }
+
+    /// Apply a resource to the test namespace
+    ///
+    /// Creates the resource in the test namespace, overriding any namespace
+    /// specified in the resource metadata.
+    pub async fn apply<K>(&self, resource: &K) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        // Clone and set namespace to our test namespace
+        let mut resource = resource.clone();
+        resource.meta_mut().namespace = Some(self.namespace.clone());
+
+        let created = api
+            .create(&PostParams::default(), &resource)
+            .await
+            .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+        info!(
+            namespace = %self.namespace,
+            name = ?created.meta().name,
+            "Applied resource"
+        );
+
+        Ok(created)
+    }
+
+    /// Get a resource from the test namespace
+    pub async fn get<K>(&self, name: &str) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let resource = api
+            .get(name)
+            .await
+            .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+        Ok(resource)
     }
 }
 
@@ -145,5 +203,81 @@ mod tests {
             }
             Err(e) => panic!("Unexpected error: {}", e),
         }
+    }
+
+    /// RED: Test that apply() creates a resource in the test namespace
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_apply_creates_resource() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a ConfigMap
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-config".to_string()),
+                ..Default::default()
+            },
+            data: Some(
+                [("key".to_string(), "value".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        // Apply it
+        let created = ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Verify it was created in our namespace
+        assert_eq!(
+            created.metadata.namespace,
+            Some(ctx.namespace.clone()),
+            "Resource should be in test namespace"
+        );
+        assert_eq!(
+            created.metadata.name,
+            Some("test-config".to_string()),
+            "Resource should have correct name"
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// RED: Test that get() retrieves a resource from the test namespace
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_get_retrieves_resource() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a ConfigMap first
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-config".to_string()),
+                ..Default::default()
+            },
+            data: Some(
+                [("mykey".to_string(), "myvalue".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Now get it
+        let retrieved: ConfigMap = ctx.get("test-config").await.expect("Should get ConfigMap");
+
+        // Verify the data
+        let data = retrieved.data.expect("Should have data");
+        assert_eq!(data.get("mykey"), Some(&"myvalue".to_string()));
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
     }
 }
