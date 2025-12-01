@@ -16,7 +16,10 @@ pub struct ExistingProvider {
 
 impl ExistingProvider {
     pub fn new(kubeconfig: Option<String>, context: Option<String>) -> Self {
-        Self { kubeconfig, context }
+        Self {
+            kubeconfig,
+            context,
+        }
     }
 }
 
@@ -46,7 +49,10 @@ impl ClusterProvider for ExistingProvider {
     #[instrument(skip(self), fields(cluster_name = %name, provider = "existing"))]
     async fn delete(&self, name: &str) -> Result<(), ProviderError> {
         // No-op for existing clusters - we don't delete clusters we didn't create
-        debug!("Skipping delete for existing cluster: {} (not managed by Seppo)", name);
+        debug!(
+            "Skipping delete for existing cluster: {} (not managed by Seppo)",
+            name
+        );
         Ok(())
     }
 
@@ -55,7 +61,7 @@ impl ClusterProvider for ExistingProvider {
         // Cannot load images into remote/existing clusters
         // User must push to a registry that the cluster can pull from
         Err(ProviderError::NotAvailable(
-            "Cannot load images into existing cluster. Push to a registry instead.".to_string()
+            "Cannot load images into existing cluster. Push to a registry instead.".to_string(),
         ))
     }
 
@@ -72,7 +78,8 @@ impl ClusterProvider for ExistingProvider {
             cmd.args(["--context", context]);
         }
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| ProviderError::CommandFailed(e.to_string()))?;
 
         Ok(output.status.success())

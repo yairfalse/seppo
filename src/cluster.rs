@@ -116,10 +116,7 @@ async fn install_gateway_api_crds() -> Result<(), Box<dyn std::error::Error>> {
 ///     Ok(())
 /// }
 /// ```
-pub async fn load_image(
-    cluster_name: &str,
-    image: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn load_image(cluster_name: &str, image: &str) -> Result<(), Box<dyn std::error::Error>> {
     let provider = KindProvider::new();
     provider.load_image(cluster_name, image).await?;
     Ok(())
@@ -135,7 +132,9 @@ mod tests {
         let cluster_name = "seppo-test-cluster";
 
         // Create cluster
-        create(cluster_name).await.expect("Failed to create cluster");
+        create(cluster_name)
+            .await
+            .expect("Failed to create cluster");
 
         // Verify it exists
         assert!(
@@ -144,7 +143,9 @@ mod tests {
         );
 
         // Delete cluster
-        delete(cluster_name).await.expect("Failed to delete cluster");
+        delete(cluster_name)
+            .await
+            .expect("Failed to delete cluster");
 
         // Verify it's gone
         assert!(

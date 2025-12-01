@@ -84,8 +84,7 @@ impl TelemetryConfig {
                 .unwrap_or_else(|_| "seppo".to_string()),
             version: std::env::var("SEPPO_VERSION")
                 .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
-            cluster_id: std::env::var("SEPPO_CLUSTER_ID")
-                .unwrap_or_else(|_| "default".to_string()),
+            cluster_id: std::env::var("SEPPO_CLUSTER_ID").unwrap_or_else(|_| "default".to_string()),
             namespace: std::env::var("SEPPO_NAMESPACE")
                 .unwrap_or_else(|_| "seppo-system".to_string()),
             metric_interval: std::env::var("SEPPO_METRIC_INTERVAL_SECS")
@@ -161,8 +160,8 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, Teleme
     global::set_meter_provider(meter_provider.clone());
 
     // Setup tracing subscriber with OpenTelemetry layer
-    let telemetry_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer_provider.tracer("seppo"));
+    let telemetry_layer =
+        tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("seppo"));
 
     // Use try_init to avoid panic if called multiple times
     let _ = tracing_subscriber::registry()

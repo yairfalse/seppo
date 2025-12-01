@@ -157,7 +157,9 @@ mod tests {
         let mut env = std::collections::HashMap::new();
         env.insert("MY_VAR".to_string(), "my_value".to_string());
 
-        let result = run_with_env("sh", &["-c", "echo $MY_VAR"], &env).await.unwrap();
+        let result = run_with_env("sh", &["-c", "echo $MY_VAR"], &env)
+            .await
+            .unwrap();
 
         assert!(result.stdout.contains("my_value"));
     }
