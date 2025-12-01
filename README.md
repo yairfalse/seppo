@@ -2,6 +2,8 @@
 
 Kubernetes testing SDK. Native library, no config files.
 
+**Status:** Testing CI/CD workflow (Option 3: Just + Act)
+
 ## What it does
 
 ```
