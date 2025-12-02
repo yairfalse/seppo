@@ -78,3 +78,6 @@ pub use provider::{
 };
 pub use runner::{run, run_with_env, RunResult, RunnerError};
 pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
+
+// Re-export proc macros
+pub use seppo_macros::test;

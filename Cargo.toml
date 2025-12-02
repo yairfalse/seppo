@@ -10,7 +10,7 @@ keywords = ["kubernetes", "testing", "kind", "eks", "integration-tests"]
 categories = ["development-tools::testing"]
 
 [workspace]
-members = ["."]
+members = [".", "seppo-macros"]
 
 [lib]
 name = "seppo"
@@ -36,6 +36,9 @@ serde_json = "1.0"
 # Utilities
 futures = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
+
+# Macros
+seppo-macros = { path = "seppo-macros" }
 
 # Logging & Telemetry
 tracing = "0.1"

@@ -1,0 +1,19 @@
+[package]
+name = "seppo-macros"
+version = "0.1.0"
+edition = "2021"
+authors = ["Yair <yair@example.com>"]
+license = "Apache-2.0"
+description = "Proc macros for seppo Kubernetes testing framework"
+repository = "https://github.com/you/seppo"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing"] }
+
+# Note: Runtime deps are used by the generated code, not the macro itself
+# Users must have these in their dep tree (seppo already provides them)
