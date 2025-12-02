@@ -42,6 +42,9 @@ pub enum ContextError {
 
     #[error("Failed to get logs: {0}")]
     LogsError(String),
+
+    #[error("Wait timeout: {0}")]
+    WaitTimeout(String),
 }
 
 impl TestContext {
@@ -202,6 +205,74 @@ impl TestContext {
             .map_err(|e| ContextError::LogsError(e.to_string()))?;
 
         Ok(logs)
+    }
+
+    /// Wait for a resource to satisfy a condition
+    ///
+    /// Polls the resource until the condition returns true or timeout is reached.
+    /// Default timeout is 60 seconds, polling interval is 1 second.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Wait for a ConfigMap to have a specific key
+    /// ctx.wait_for::<ConfigMap>("my-config", |cm| {
+    ///     cm.data.as_ref().map_or(false, |d| d.contains_key("ready"))
+    /// }).await?;
+    /// ```
+    pub async fn wait_for<K, F>(&self, name: &str, condition: F) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+        F: Fn(&K) -> bool,
+    {
+        self.wait_for_with_timeout(name, condition, std::time::Duration::from_secs(60))
+            .await
+    }
+
+    /// Wait for a resource with custom timeout
+    pub async fn wait_for_with_timeout<K, F>(
+        &self,
+        name: &str,
+        condition: F,
+        timeout: std::time::Duration,
+    ) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+        F: Fn(&K) -> bool,
+    {
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_secs(1);
+
+        loop {
+            match self.get::<K>(name).await {
+                Ok(resource) => {
+                    if condition(&resource) {
+                        return Ok(resource);
+                    }
+                }
+                Err(ContextError::GetError(_)) => {
+                    // Resource doesn't exist yet, keep waiting
+                }
+                Err(e) => return Err(e),
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(ContextError::WaitTimeout(format!(
+                    "Timed out waiting for {} after {:?}",
+                    name, timeout
+                )));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
     }
 }
 
@@ -451,6 +522,91 @@ mod tests {
             logs.contains("hello from seppo"),
             "Logs should contain our message, got: {}",
             logs
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that wait_for() waits for a condition to be met
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_wait_for_condition() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a ConfigMap
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("wait-test".to_string()),
+                ..Default::default()
+            },
+            data: Some(
+                [("status".to_string(), "ready".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Wait for it to have the "status" key with value "ready"
+        let result: ConfigMap = ctx
+            .wait_for("wait-test", |cm: &ConfigMap| {
+                cm.data
+                    .as_ref()
+                    .and_then(|d| d.get("status"))
+                    .is_some_and(|v| v == "ready")
+            })
+            .await
+            .expect("Should find ConfigMap with condition");
+
+        assert_eq!(
+            result.data.unwrap().get("status"),
+            Some(&"ready".to_string())
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that wait_for() times out when condition is not met
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_wait_for_timeout() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a ConfigMap without the expected data
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("timeout-test".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Wait for a condition that will never be true (with short timeout)
+        let result: Result<ConfigMap, _> = ctx
+            .wait_for_with_timeout(
+                "timeout-test",
+                |cm: &ConfigMap| {
+                    cm.data
+                        .as_ref()
+                        .is_some_and(|d| d.contains_key("never-exists"))
+                },
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ContextError::WaitTimeout(_))),
+            "Should timeout"
         );
 
         // Cleanup
