@@ -97,7 +97,7 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         eprintln!("  kubectl -n {} get all", namespace);
                         eprintln!("  kubectl -n {} describe pods", namespace);
                         eprintln!("  kubectl -n {} logs <pod>", namespace);
-                        eprintln!("");
+                        eprintln!();
 
                         // Re-panic to fail the test
                         std::panic::resume_unwind(panic_info);
