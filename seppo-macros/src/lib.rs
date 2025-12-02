@@ -4,7 +4,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType};
+use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType, ReturnType};
 
 /// Attribute macro for Kubernetes integration tests.
 ///
@@ -27,6 +27,16 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType};
 /// }
 /// ```
 ///
+/// # With Result Return Type
+///
+/// ```ignore
+/// #[seppo::test]
+/// async fn test_with_result(ctx: TestContext) -> Result<(), Box<dyn std::error::Error>> {
+///     ctx.apply(&deployment).await?;
+///     Ok(())
+/// }
+/// ```
+///
 /// # What it does
 ///
 /// The macro transforms your test function to:
@@ -37,8 +47,9 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType};
 ///
 /// # Environment Variables
 ///
-/// - `SEPPO_KEEP_ON_FAILURE=true` (default) - Keep namespace on test failure
-/// - `SEPPO_KEEP_ALL=true` - Never cleanup (debug mode)
+/// - `SEPPO_KEEP_ALL=true` - Never cleanup, even on success (debug mode)
+///
+/// Note: Namespace is always kept on failure for debugging.
 #[proc_macro_attribute]
 pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
@@ -58,8 +69,38 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
         false
     });
 
+    // Check if function returns a Result type
+    let has_result_return = matches!(&input_fn.sig.output, ReturnType::Type(..));
+
     let output = if has_ctx_param {
         // Function expects ctx parameter - create and inject it
+        let test_execution = if has_result_return {
+            // Handle Result return type - convert errors to panics for test failure
+            quote! {
+                let test_result: Result<(), Box<dyn std::error::Error + Send + Sync>> = (async {
+                    let result = #fn_block;
+                    // Convert any error type to Box<dyn Error>
+                    result.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+                }).await;
+
+                match test_result {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("{}", e)
+                    )) as Box<dyn std::any::Any + Send>),
+                }
+            }
+        } else {
+            // No Result return - wrap in Ok
+            quote! {
+                (async {
+                    #fn_block
+                }).await;
+                Ok::<(), Box<dyn std::any::Any + Send>>(())
+            }
+        };
+
         quote! {
             #(#fn_attrs)*
             #[tokio::test]
@@ -73,13 +114,20 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 // Run test and catch any panics
                 let result = AssertUnwindSafe(async {
-                    #fn_block
+                    #test_execution
                 })
                 .catch_unwind()
                 .await;
 
-                match result {
-                    Ok(_) => {
+                // Flatten the result: catch_unwind returns Result<Result<(), E>, PanicInfo>
+                let final_result = match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(panic_info) => Err(panic_info),
+                };
+
+                match final_result {
+                    Ok(()) => {
                         // Success - cleanup unless SEPPO_KEEP_ALL is set
                         if std::env::var("SEPPO_KEEP_ALL").is_ok() {
                             eprintln!("[seppo] SEPPO_KEEP_ALL set - keeping namespace: {}", namespace);

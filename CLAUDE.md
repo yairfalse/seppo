@@ -158,9 +158,10 @@ pod/myapp-xyz     ImagePullBackOff
 
 Configurable:
 ```bash
-SEPPO_KEEP_ON_FAILURE=true   # default
-SEPPO_KEEP_ALL=true          # never cleanup (debug mode)
+SEPPO_KEEP_ALL=true          # never cleanup, even on success (debug mode)
 ```
+
+Note: Namespace is always kept on failure for debugging.
 
 ---
 

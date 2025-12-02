@@ -6,7 +6,7 @@
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Test context providing K8s connection and isolated namespace
 pub struct TestContext {
@@ -251,15 +251,39 @@ impl TestContext {
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_secs(1);
 
+        debug!(
+            namespace = %self.namespace,
+            resource = %name,
+            timeout = ?timeout,
+            "Starting wait_for"
+        );
+
         loop {
             match self.get::<K>(name).await {
                 Ok(resource) => {
                     if condition(&resource) {
+                        debug!(
+                            namespace = %self.namespace,
+                            resource = %name,
+                            elapsed = ?start.elapsed(),
+                            "Condition met"
+                        );
                         return Ok(resource);
                     }
+                    debug!(
+                        namespace = %self.namespace,
+                        resource = %name,
+                        elapsed = ?start.elapsed(),
+                        "Resource exists but condition not met, waiting..."
+                    );
                 }
                 Err(ContextError::GetError(_)) => {
-                    // Resource doesn't exist yet, keep waiting
+                    debug!(
+                        namespace = %self.namespace,
+                        resource = %name,
+                        elapsed = ?start.elapsed(),
+                        "Resource doesn't exist yet, waiting..."
+                    );
                 }
                 Err(e) => return Err(e),
             }
