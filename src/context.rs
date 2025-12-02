@@ -33,6 +33,15 @@ pub enum ContextError {
 
     #[error("Failed to get resource: {0}")]
     GetError(String),
+
+    #[error("Failed to delete resource: {0}")]
+    DeleteError(String),
+
+    #[error("Failed to list resources: {0}")]
+    ListError(String),
+
+    #[error("Failed to get logs: {0}")]
+    LogsError(String),
 }
 
 impl TestContext {
@@ -136,6 +145,63 @@ impl TestContext {
             .map_err(|e| ContextError::GetError(e.to_string()))?;
 
         Ok(resource)
+    }
+
+    /// Delete a resource from the test namespace
+    pub async fn delete<K>(&self, name: &str) -> Result<(), ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        api.delete(name, &DeleteParams::default())
+            .await
+            .map_err(|e| ContextError::DeleteError(e.to_string()))?;
+
+        info!(
+            namespace = %self.namespace,
+            name = %name,
+            "Deleted resource"
+        );
+
+        Ok(())
+    }
+
+    /// List resources of a given type in the test namespace
+    pub async fn list<K>(&self) -> Result<Vec<K>, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let list = api
+            .list(&Default::default())
+            .await
+            .map_err(|e| ContextError::ListError(e.to_string()))?;
+
+        Ok(list.items)
+    }
+
+    /// Get logs from a pod in the test namespace
+    pub async fn logs(&self, pod_name: &str) -> Result<String, ContextError> {
+        use k8s_openapi::api::core::v1::Pod;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let logs = pods
+            .logs(pod_name, &Default::default())
+            .await
+            .map_err(|e| ContextError::LogsError(e.to_string()))?;
+
+        Ok(logs)
     }
 }
 
@@ -276,6 +342,116 @@ mod tests {
         // Verify the data
         let data = retrieved.data.expect("Should have data");
         assert_eq!(data.get("mykey"), Some(&"myvalue".to_string()));
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that delete() removes a resource from the test namespace
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_delete_removes_resource() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a ConfigMap
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("to-delete".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Delete it
+        ctx.delete::<ConfigMap>("to-delete")
+            .await
+            .expect("Should delete ConfigMap");
+
+        // Verify it's gone
+        let result: Result<ConfigMap, _> = ctx.get("to-delete").await;
+        assert!(result.is_err(), "ConfigMap should be deleted");
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that list() returns resources from the test namespace
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_list_returns_resources() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create multiple ConfigMaps
+        for i in 0..3 {
+            let cm = ConfigMap {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(format!("config-{}", i)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            ctx.apply(&cm).await.expect("Should apply ConfigMap");
+        }
+
+        // List them
+        let configs: Vec<ConfigMap> = ctx.list().await.expect("Should list ConfigMaps");
+
+        assert_eq!(configs.len(), 3, "Should have 3 ConfigMaps");
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that logs() retrieves pod logs
+    #[tokio::test]
+    #[ignore] // Requires real cluster with a running pod
+    async fn test_context_logs_retrieves_pod_logs() {
+        use k8s_openapi::api::core::v1::Pod;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a simple pod that outputs something
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-pod".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "test".to_string(),
+                    image: Some("busybox:latest".to_string()),
+                    command: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "echo 'hello from seppo' && sleep 30".to_string(),
+                    ]),
+                    ..Default::default()
+                }],
+                restart_policy: Some("Never".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait a bit for pod to start and output logs
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Get logs
+        let logs = ctx.logs("test-pod").await.expect("Should get logs");
+
+        assert!(
+            logs.contains("hello from seppo"),
+            "Logs should contain our message, got: {}",
+            logs
+        );
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
