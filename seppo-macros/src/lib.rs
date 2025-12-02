@@ -68,7 +68,7 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 use futures::FutureExt;
 
                 let ctx = seppo::TestContext::new().await
-                    .expect("Failed to create TestContext");
+                    .unwrap_or_else(|e| panic!("Failed to create TestContext: {}", e));
                 let namespace = ctx.namespace.clone();
 
                 // Run test and catch any panics
