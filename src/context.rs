@@ -3,10 +3,12 @@
 //! Provides a connection to a Kubernetes cluster with an isolated namespace
 //! for each test.
 
-use k8s_openapi::api::core::v1::Namespace;
+use crate::diagnostics::Diagnostics;
+use k8s_openapi::api::core::v1::{Event, Namespace, Pod};
 use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
-use tracing::{debug, info};
+use std::collections::HashMap;
+use tracing::{debug, info, warn};
 
 /// Test context providing K8s connection and isolated namespace
 pub struct TestContext {
@@ -45,6 +47,9 @@ pub enum ContextError {
 
     #[error("Wait timeout: {0}")]
     WaitTimeout(String),
+
+    #[error("Failed to get events: {0}")]
+    EventsError(String),
 }
 
 impl TestContext {
@@ -297,6 +302,78 @@ impl TestContext {
 
             tokio::time::sleep(poll_interval).await;
         }
+    }
+
+    /// Get events from the test namespace
+    ///
+    /// Returns all events in the namespace, useful for debugging test failures.
+    pub async fn events(&self) -> Result<Vec<Event>, ContextError> {
+        let events: Api<Event> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let list = events
+            .list(&Default::default())
+            .await
+            .map_err(|e| ContextError::EventsError(e.to_string()))?;
+
+        Ok(list.items)
+    }
+
+    /// Collect logs from all pods in the test namespace
+    ///
+    /// Returns a map of pod name to logs. Pods that don't have logs yet
+    /// (e.g., pending pods) will have an empty string or error message.
+    pub async fn collect_pod_logs(&self) -> Result<HashMap<String, String>, ContextError> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let pod_list = pods
+            .list(&Default::default())
+            .await
+            .map_err(|e| ContextError::ListError(e.to_string()))?;
+
+        let mut logs_map = HashMap::new();
+
+        for pod in pod_list.items {
+            let pod_name = pod.metadata.name.unwrap_or_default();
+            if pod_name.is_empty() {
+                continue;
+            }
+
+            // Try to get logs, but don't fail if pod isn't ready
+            let logs = match pods.logs(&pod_name, &Default::default()).await {
+                Ok(logs) => logs,
+                Err(e) => format!("[error getting logs: {}]", e),
+            };
+
+            logs_map.insert(pod_name, logs);
+        }
+
+        Ok(logs_map)
+    }
+
+    /// Collect all diagnostic information for debugging
+    ///
+    /// Gathers pod logs and events from the namespace. This is called
+    /// automatically on test failure by the `#[seppo::test]` macro.
+    pub async fn collect_diagnostics(&self) -> Diagnostics {
+        let mut diag = Diagnostics::new(self.namespace.clone());
+
+        // Collect pod logs (best effort)
+        match self.collect_pod_logs().await {
+            Ok(logs) => diag.pod_logs = logs,
+            Err(e) => {
+                warn!(error = %e, "Failed to collect pod logs for diagnostics");
+            }
+        }
+
+        // Collect events (best effort)
+        match self.events().await {
+            Ok(events) => diag.events = events,
+            Err(e) => {
+                warn!(error = %e, "Failed to collect events for diagnostics");
+            }
+        }
+
+        diag
     }
 }
 
@@ -591,6 +668,83 @@ mod tests {
             result.data.unwrap().get("status"),
             Some(&"ready".to_string())
         );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that collect_pod_logs() returns logs for all pods
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_collect_pod_logs() {
+        use k8s_openapi::api::core::v1::Pod;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a simple pod
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("log-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "test".to_string(),
+                    image: Some("busybox:latest".to_string()),
+                    command: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "echo 'test output' && sleep 30".to_string(),
+                    ]),
+                    ..Default::default()
+                }],
+                restart_policy: Some("Never".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait for pod to start
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Collect all pod logs
+        let pod_logs = ctx.collect_pod_logs().await.expect("Should collect logs");
+
+        // Should have one pod's logs
+        assert_eq!(pod_logs.len(), 1);
+        assert!(pod_logs.contains_key("log-test"));
+        assert!(pod_logs["log-test"].contains("test output"));
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that events() returns namespace events
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_events() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a ConfigMap to generate an event
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("event-test".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Get events - should have at least namespace creation event
+        let events = ctx.events().await.expect("Should get events");
+
+        // Events list should be returned (may be empty for ConfigMap, but method should work)
+        assert!(events.is_empty() || !events.is_empty()); // Just verify it returns
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");

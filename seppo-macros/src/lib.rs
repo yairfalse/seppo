@@ -138,14 +138,9 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         }
                     }
                     Err(panic_info) => {
-                        // Failure - keep namespace for debugging
-                        eprintln!("\n[seppo] Test failed - namespace kept for debugging");
-                        eprintln!("[seppo] Namespace: {}", namespace);
-                        eprintln!("[seppo] Debug commands:");
-                        eprintln!("  kubectl -n {} get all", namespace);
-                        eprintln!("  kubectl -n {} describe pods", namespace);
-                        eprintln!("  kubectl -n {} logs <pod>", namespace);
-                        eprintln!();
+                        // Collect and print diagnostics before re-panicking
+                        let diag = ctx.collect_diagnostics().await;
+                        eprintln!("{}", diag);
 
                         // Re-panic to fail the test
                         std::panic::resume_unwind(panic_info);
