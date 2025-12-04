@@ -461,7 +461,8 @@ impl TestContext {
     /// ```ignore
     /// let stack = Stack::new()
     ///     .service("frontend").image("fe:test").replicas(4).port(80)
-    ///     .service("backend").image("be:test").replicas(2).port(8080);
+    ///     .service("backend").image("be:test").replicas(2).port(8080)
+    ///     .build();  // <-- This is required
     ///
     /// ctx.up(&stack).await?;
     /// ```
