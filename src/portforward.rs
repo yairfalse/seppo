@@ -14,17 +14,11 @@ use tracing::{debug, warn};
 /// Error type for port forwarding operations
 #[derive(Debug, thiserror::Error)]
 pub enum PortForwardError {
-    #[error("Failed to create port forward: {0}")]
-    CreateError(String),
-
     #[error("Failed to bind local port: {0}")]
     BindError(String),
 
     #[error("HTTP request failed: {0}")]
     RequestError(String),
-
-    #[error("Port forward not ready")]
-    NotReady,
 }
 
 /// A port forward to a Kubernetes pod
@@ -66,12 +60,15 @@ impl PortForward {
 
         // Spawn the forwarding task
         tokio::spawn(async move {
+            // Create Api once outside the loop
+            let pods: Api<Pod> = Api::namespaced(client, &namespace);
+
             loop {
                 tokio::select! {
                     accept_result = listener.accept() => {
                         match accept_result {
                             Ok((mut local_stream, _)) => {
-                                let pods = Api::<Pod>::namespaced(client.clone(), &namespace);
+                                let pods = pods.clone();
                                 let pod_name = pod_name.clone();
 
                                 tokio::spawn(async move {
@@ -90,8 +87,16 @@ impl PortForward {
                                                 };
 
                                                 tokio::select! {
-                                                    _ = client_to_server => {},
-                                                    _ = server_to_client => {},
+                                                    result = client_to_server => {
+                                                        if let Err(e) = result {
+                                                            warn!(error = %e, "Error copying client to server");
+                                                        }
+                                                    },
+                                                    result = server_to_client => {
+                                                        if let Err(e) = result {
+                                                            warn!(error = %e, "Error copying server to client");
+                                                        }
+                                                    },
                                                 }
                                             }
                                         }
@@ -126,9 +131,11 @@ impl PortForward {
     }
 
     /// Make an HTTP GET request through the port forward
-    pub async fn get(&mut self, path: &str) -> Result<String, PortForwardError> {
-        let url = format!("http://{}{}", self.local_addr, path);
-
+    ///
+    /// Returns the response body as a UTF-8 string. Binary responses
+    /// are not supported - use `local_addr()` with your own HTTP client
+    /// for binary data.
+    pub async fn get(&self, path: &str) -> Result<String, PortForwardError> {
         // Simple HTTP/1.1 GET request
         let mut stream = tokio::net::TcpStream::connect(self.local_addr)
             .await
@@ -150,13 +157,50 @@ impl PortForward {
             .await
             .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
 
-        debug!(url = %url, "HTTP GET completed");
+        debug!(
+            local_addr = %self.local_addr,
+            path = %path,
+            "HTTP GET completed"
+        );
 
-        // Extract body from response (after \r\n\r\n)
-        if let Some(body_start) = response.find("\r\n\r\n") {
-            Ok(response[body_start + 4..].to_string())
-        } else {
-            Ok(response)
-        }
+        Ok(extract_body(&response))
+    }
+}
+
+/// Extract the body from an HTTP response
+fn extract_body(response: &str) -> String {
+    if let Some(body_start) = response.find("\r\n\r\n") {
+        response[body_start + 4..].to_string()
+    } else {
+        response.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_body_with_headers() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>body</html>";
+        assert_eq!(extract_body(response), "<html>body</html>");
+    }
+
+    #[test]
+    fn test_extract_body_empty_body() {
+        let response = "HTTP/1.1 204 No Content\r\n\r\n";
+        assert_eq!(extract_body(response), "");
+    }
+
+    #[test]
+    fn test_extract_body_no_separator() {
+        let response = "malformed response";
+        assert_eq!(extract_body(response), "malformed response");
+    }
+
+    #[test]
+    fn test_extract_body_multiple_separators() {
+        let response = "HTTP/1.1 200 OK\r\n\r\nfirst\r\n\r\nsecond";
+        assert_eq!(extract_body(response), "first\r\n\r\nsecond");
     }
 }

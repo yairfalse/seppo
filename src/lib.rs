@@ -67,6 +67,7 @@ pub mod metrics;
 pub mod portforward;
 pub mod provider;
 pub mod runner;
+pub mod stack;
 pub mod telemetry;
 
 // Re-export commonly used types
@@ -81,6 +82,7 @@ pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
 };
 pub use runner::{run, run_with_env, RunResult, RunnerError};
+pub use stack::{ServiceBuilder, Stack, StackError};
 pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
 
 // Re-export proc macros
