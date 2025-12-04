@@ -64,6 +64,7 @@ pub mod context;
 pub mod diagnostics;
 pub mod environment;
 pub mod metrics;
+pub mod portforward;
 pub mod provider;
 pub mod runner;
 pub mod telemetry;
@@ -75,6 +76,7 @@ pub use context::{ContextError, TestContext};
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
 pub use metrics::{metrics, SeppoMetrics};
+pub use portforward::{PortForward, PortForwardError};
 pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
 };
