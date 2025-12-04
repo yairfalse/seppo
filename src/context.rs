@@ -5,7 +5,9 @@
 
 use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
-use k8s_openapi::api::core::v1::{Event, Namespace, Pod};
+use crate::stack::{Stack, StackError};
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
 use kube::api::{Api, AttachParams, DeleteParams, PostParams};
 use kube::Client;
 use std::collections::HashMap;
@@ -448,6 +450,61 @@ impl TestContext {
         port: u16,
     ) -> Result<PortForward, PortForwardError> {
         PortForward::new(self.client.clone(), &self.namespace, pod_name, port).await
+    }
+
+    /// Deploy a stack of services to the test namespace
+    ///
+    /// Creates Deployments and Services for all services defined in the stack.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stack = Stack::new()
+    ///     .service("frontend").image("fe:test").replicas(4).port(80)
+    ///     .service("backend").image("be:test").replicas(2).port(8080);
+    ///
+    /// ctx.up(&stack).await?;
+    /// ```
+    pub async fn up(&self, stack: &Stack) -> Result<(), StackError> {
+        if stack.services().is_empty() {
+            return Err(StackError::EmptyStack);
+        }
+
+        let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
+        let services: Api<Service> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        for svc_def in stack.services() {
+            // Create Deployment
+            let deployment = stack.deployment_for(svc_def, &self.namespace);
+            deployments
+                .create(&PostParams::default(), &deployment)
+                .await
+                .map_err(|e| StackError::DeployError(svc_def.name.clone(), e.to_string()))?;
+
+            info!(
+                namespace = %self.namespace,
+                service = %svc_def.name,
+                replicas = %svc_def.replicas,
+                "Deployed service"
+            );
+
+            // Create Service if port is defined
+            if let Some(k8s_svc) = stack.service_for(svc_def, &self.namespace) {
+                services
+                    .create(&PostParams::default(), &k8s_svc)
+                    .await
+                    .map_err(|e| StackError::DeployError(svc_def.name.clone(), e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    service = %svc_def.name,
+                    port = ?svc_def.port,
+                    "Created service"
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 
