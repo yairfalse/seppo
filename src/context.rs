@@ -470,6 +470,15 @@ impl TestContext {
             return Err(StackError::EmptyStack);
         }
 
+        // Validate all services have required fields
+        for svc_def in stack.services() {
+            if svc_def.image.is_empty() {
+                return Err(StackError::DeployError(
+                    svc_def.name.clone(),
+                    "image is required".to_string()
+                ));
+            }
+        }
         let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
         let services: Api<Service> = Api::namespaced(self.client.clone(), &self.namespace);
 
