@@ -170,11 +170,17 @@ impl ServiceBuilder {
     }
 
     /// Set the number of replicas for this service
-    pub fn replicas(mut self, count: i32) -> Self {
+    pub fn replicas(mut self, count: i32) -> Result<Self, StackError> {
+        if count < 0 {
+            return Err(StackError::DeployError(
+                self.stack.services.last().map(|s| s.name.clone()).unwrap_or_default(),
+                format!("replicas must be non-negative, got {}", count),
+            ));
+        }
         if let Some(svc) = self.stack.services.last_mut() {
             svc.replicas = count;
         }
-        self
+        Ok(self)
     }
 
     /// Set the port for this service
