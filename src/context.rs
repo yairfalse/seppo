@@ -4,10 +4,12 @@
 //! for each test.
 
 use crate::diagnostics::Diagnostics;
+use crate::portforward::{PortForward, PortForwardError};
 use k8s_openapi::api::core::v1::{Event, Namespace, Pod};
-use kube::api::{Api, DeleteParams, PostParams};
+use kube::api::{Api, AttachParams, DeleteParams, PostParams};
 use kube::Client;
 use std::collections::HashMap;
+use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
 /// Test context providing K8s connection and isolated namespace
@@ -50,6 +52,9 @@ pub enum ContextError {
 
     #[error("Failed to get events: {0}")]
     EventsError(String),
+
+    #[error("Failed to exec command: {0}")]
+    ExecError(String),
 }
 
 impl TestContext {
@@ -374,6 +379,75 @@ impl TestContext {
         }
 
         diag
+    }
+
+    /// Execute a command in a pod
+    ///
+    /// Runs the specified command in the first container of the pod and
+    /// returns the combined stdout/stderr output.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let output = ctx.exec("my-pod", &["cat", "/etc/config"]).await?;
+    /// assert!(output.contains("expected content"));
+    /// ```
+    pub async fn exec(&self, pod_name: &str, command: &[&str]) -> Result<String, ContextError> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let attach_params = AttachParams {
+            stdout: true,
+            stderr: true,
+            ..Default::default()
+        };
+
+        // Convert &[&str] to Vec<String> for kube API
+        let command_strings: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+
+        let mut attached = pods
+            .exec(pod_name, command_strings, &attach_params)
+            .await
+            .map_err(|e| ContextError::ExecError(e.to_string()))?;
+
+        // Collect stdout
+        let mut stdout = attached
+            .stdout()
+            .ok_or_else(|| ContextError::ExecError("No stdout stream available".to_string()))?;
+
+        let mut output = String::new();
+        stdout
+            .read_to_string(&mut output)
+            .await
+            .map_err(|e| ContextError::ExecError(e.to_string()))?;
+
+        debug!(
+            namespace = %self.namespace,
+            pod = %pod_name,
+            command = ?command,
+            "Executed command in pod"
+        );
+
+        Ok(output)
+    }
+
+    /// Create a port forward to a pod
+    ///
+    /// Opens a local port that tunnels traffic to the specified pod port.
+    /// Returns a `PortForward` that can be used to make HTTP requests.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pf = ctx.forward("my-pod", 8080).await?;
+    /// let response = pf.get("/health").await?;
+    /// assert!(response.contains("ok"));
+    /// ```
+    pub async fn forward(
+        &self,
+        pod_name: &str,
+        port: u16,
+    ) -> Result<PortForward, PortForwardError> {
+        PortForward::new(self.client.clone(), &self.namespace, pod_name, port).await
     }
 }
 
@@ -786,6 +860,108 @@ mod tests {
             matches!(result, Err(ContextError::WaitTimeout(_))),
             "Should timeout"
         );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that forward() creates a port forward to a pod
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_forward() {
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a simple nginx pod
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("forward-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "nginx".to_string(),
+                    image: Some("nginx:alpine".to_string()),
+                    ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
+                        container_port: 80,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait for pod to be running
+        ctx.wait_for::<Pod, _>("forward-test", |p| {
+            p.status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .is_some_and(|phase| phase == "Running")
+        })
+        .await
+        .expect("Pod should be running");
+
+        // Create port forward
+        let mut pf = ctx
+            .forward("forward-test", 80)
+            .await
+            .expect("Should create port forward");
+
+        // Make a request through the port forward
+        let response = pf.get("/").await.expect("Should get response");
+        assert!(response.contains("nginx") || response.contains("Welcome"));
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that exec() runs a command in a pod
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_exec() {
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a simple pod
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("exec-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "test".to_string(),
+                    image: Some("busybox:latest".to_string()),
+                    command: Some(vec!["sleep".to_string(), "300".to_string()]),
+                    ..Default::default()
+                }],
+                restart_policy: Some("Never".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait for pod to be running
+        ctx.wait_for::<Pod, _>("exec-test", |p| {
+            p.status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .is_some_and(|phase| phase == "Running")
+        })
+        .await
+        .expect("Pod should be running");
+
+        // Execute a command
+        let output = ctx
+            .exec("exec-test", &["echo", "hello from exec"])
+            .await
+            .expect("Should exec command");
+
+        assert!(output.contains("hello from exec"));
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
