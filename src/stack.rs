@@ -52,7 +52,8 @@ impl ServiceDef {
 ///     .service("backend")
 ///         .image("be:test")
 ///         .replicas(2)
-///         .port(8080);
+///         .port(8080)
+///         .build();  // <-- This is required
 ///
 /// ctx.up(&stack).await?;
 /// ```
