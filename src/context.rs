@@ -476,7 +476,7 @@ impl TestContext {
             if svc_def.image.is_empty() {
                 return Err(StackError::DeployError(
                     svc_def.name.clone(),
-                    "image is required".to_string()
+                    "image is required".to_string(),
                 ));
             }
         }
