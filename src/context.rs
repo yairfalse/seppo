@@ -467,6 +467,8 @@ impl TestContext {
     /// ctx.up(&stack).await?;
     /// ```
     pub async fn up(&self, stack: &Stack) -> Result<(), StackError> {
+        use futures::future::try_join_all;
+
         if stack.services().is_empty() {
             return Err(StackError::EmptyStack);
         }
@@ -480,38 +482,62 @@ impl TestContext {
                 ));
             }
         }
+
         let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
         let services: Api<Service> = Api::namespaced(self.client.clone(), &self.namespace);
+        let namespace = self.namespace.clone();
+
+        // Create all deployments concurrently
+        let deployment_futures = stack.services().iter().map(|svc_def| {
+            let deployments = deployments.clone();
+            let deployment = stack.deployment_for(svc_def, &namespace);
+            let name = svc_def.name.clone();
+            async move {
+                deployments
+                    .create(&PostParams::default(), &deployment)
+                    .await
+                    .map_err(|e| StackError::DeployError(name, e.to_string()))
+            }
+        });
+
+        try_join_all(deployment_futures).await?;
 
         for svc_def in stack.services() {
-            // Create Deployment
-            let deployment = stack.deployment_for(svc_def, &self.namespace);
-            deployments
-                .create(&PostParams::default(), &deployment)
-                .await
-                .map_err(|e| StackError::DeployError(svc_def.name.clone(), e.to_string()))?;
-
             info!(
                 namespace = %self.namespace,
                 service = %svc_def.name,
                 replicas = %svc_def.replicas,
                 "Deployed service"
             );
+        }
 
-            // Create Service if port is defined
-            if let Some(k8s_svc) = stack.service_for(svc_def, &self.namespace) {
-                services
-                    .create(&PostParams::default(), &k8s_svc)
-                    .await
-                    .map_err(|e| StackError::DeployError(svc_def.name.clone(), e.to_string()))?;
+        // Create all services concurrently (for those with ports)
+        let service_futures = stack
+            .services()
+            .iter()
+            .filter_map(|svc_def| {
+                stack.service_for(svc_def, &namespace).map(|k8s_svc| {
+                    let services = services.clone();
+                    let name = svc_def.name.clone();
+                    async move {
+                        services
+                            .create(&PostParams::default(), &k8s_svc)
+                            .await
+                            .map_err(|e| StackError::DeployError(name, e.to_string()))
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
 
-                info!(
-                    namespace = %self.namespace,
-                    service = %svc_def.name,
-                    port = ?svc_def.port,
-                    "Created service"
-                );
-            }
+        try_join_all(service_futures).await?;
+
+        for svc_def in stack.services().iter().filter(|s| s.port.is_some()) {
+            info!(
+                namespace = %self.namespace,
+                service = %svc_def.name,
+                port = ?svc_def.port,
+                "Created service"
+            );
         }
 
         Ok(())
@@ -1029,6 +1055,146 @@ mod tests {
             .expect("Should exec command");
 
         assert!(output.contains("hello from exec"));
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that up() deploys a stack of services
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_up_deploys_stack() {
+        use crate::stack::Stack;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a stack with one service
+        let stack = Stack::new()
+            .service("test-app")
+            .image("nginx:alpine")
+            .replicas(2)
+            .port(80)
+            .build();
+
+        // Deploy the stack
+        ctx.up(&stack).await.expect("Should deploy stack");
+
+        // Verify deployment was created
+        let deployment: Deployment = ctx.get("test-app").await.expect("Deployment should exist");
+        assert_eq!(
+            deployment.spec.as_ref().unwrap().replicas,
+            Some(2),
+            "Should have 2 replicas"
+        );
+
+        // Verify service was created
+        let service: Service = ctx.get("test-app").await.expect("Service should exist");
+        assert_eq!(
+            service.spec.as_ref().unwrap().ports.as_ref().unwrap()[0].port,
+            80,
+            "Service should expose port 80"
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that up() deploys multiple services concurrently
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_up_deploys_multiple_services() {
+        use crate::stack::Stack;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a stack with multiple services
+        let stack = Stack::new()
+            .service("frontend")
+            .image("nginx:alpine")
+            .replicas(2)
+            .port(80)
+            .service("backend")
+            .image("nginx:alpine")
+            .replicas(1)
+            .port(8080)
+            .service("worker")
+            .image("busybox:latest")
+            .replicas(3)
+            .build(); // worker has no port, so no Service
+
+        // Deploy the stack
+        ctx.up(&stack).await.expect("Should deploy stack");
+
+        // Verify all deployments were created
+        let frontend: Deployment = ctx.get("frontend").await.expect("frontend should exist");
+        assert_eq!(frontend.spec.as_ref().unwrap().replicas, Some(2));
+
+        let backend: Deployment = ctx.get("backend").await.expect("backend should exist");
+        assert_eq!(backend.spec.as_ref().unwrap().replicas, Some(1));
+
+        let worker: Deployment = ctx.get("worker").await.expect("worker should exist");
+        assert_eq!(worker.spec.as_ref().unwrap().replicas, Some(3));
+
+        // Verify services were created for frontend and backend (they have ports)
+        let frontend_svc: Service = ctx
+            .get("frontend")
+            .await
+            .expect("frontend svc should exist");
+        assert_eq!(
+            frontend_svc.spec.as_ref().unwrap().ports.as_ref().unwrap()[0].port,
+            80
+        );
+
+        let backend_svc: Service = ctx.get("backend").await.expect("backend svc should exist");
+        assert_eq!(
+            backend_svc.spec.as_ref().unwrap().ports.as_ref().unwrap()[0].port,
+            8080
+        );
+
+        // Worker should NOT have a Service (no port defined)
+        let worker_svc: Result<Service, _> = ctx.get("worker").await;
+        assert!(worker_svc.is_err(), "worker should not have a Service");
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that up() fails on empty stack
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_up_fails_on_empty_stack() {
+        use crate::stack::Stack;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        let stack = Stack::new();
+
+        let result = ctx.up(&stack).await;
+        assert!(
+            matches!(result, Err(StackError::EmptyStack)),
+            "Should fail with EmptyStack error"
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that up() fails when service has no image
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_up_fails_without_image() {
+        use crate::stack::Stack;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a service without an image
+        let stack = Stack::new().service("no-image").replicas(1).build();
+
+        let result = ctx.up(&stack).await;
+        assert!(
+            matches!(result, Err(StackError::DeployError(name, _)) if name == "no-image"),
+            "Should fail with DeployError for missing image"
+        );
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");

@@ -182,7 +182,15 @@ impl ServiceBuilder {
     }
 
     /// Set the port for this service
+    ///
+    /// # Panics
+    /// Panics if port is not in range 1-65535.
     pub fn port(mut self, port: i32) -> Self {
+        assert!(
+            port > 0 && port <= 65535,
+            "port must be between 1 and 65535, got {}",
+            port
+        );
         if let Some(svc) = self.stack.services.last_mut() {
             svc.port = Some(port);
         }
