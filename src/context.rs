@@ -386,7 +386,7 @@ impl TestContext {
     /// Execute a command in a pod
     ///
     /// Runs the specified command in the first container of the pod and
-    /// returns the combined stdout/stderr output.
+    /// returns the stdout output as a string.
     ///
     /// # Example
     ///
@@ -440,7 +440,7 @@ impl TestContext {
     /// # Example
     ///
     /// ```ignore
-    /// let mut pf = ctx.forward("my-pod", 8080).await?;
+    /// let pf = ctx.forward("my-pod", 8080).await?;
     /// let response = pf.get("/health").await?;
     /// assert!(response.contains("ok"));
     /// ```
@@ -962,7 +962,7 @@ mod tests {
         .expect("Pod should be running");
 
         // Create port forward
-        let mut pf = ctx
+        let pf = ctx
             .forward("forward-test", 80)
             .await
             .expect("Should create port forward");
