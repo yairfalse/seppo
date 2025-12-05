@@ -6,13 +6,68 @@
 use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
 use crate::stack::{Stack, StackError};
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
 use kube::api::{Api, AttachParams, DeleteParams, PostParams};
 use kube::Client;
 use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
+
+/// Kubernetes resource kinds supported by wait_ready
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    Deployment,
+    Pod,
+    Service,
+    StatefulSet,
+    DaemonSet,
+}
+
+/// Parse a resource reference like "deployment/myapp" into (kind, name)
+///
+/// Supports kubectl-style aliases:
+/// - `deployment`, `deploy` → Deployment
+/// - `pod`, `po` → Pod
+/// - `service`, `svc` → Service
+/// - `statefulset`, `sts` → StatefulSet
+/// - `daemonset`, `ds` → DaemonSet
+pub fn parse_resource_ref(reference: &str) -> Result<(ResourceKind, &str), ContextError> {
+    let parts: Vec<&str> = reference.splitn(2, '/').collect();
+
+    if parts.len() != 2 {
+        return Err(ContextError::InvalidResourceRef(format!(
+            "expected 'kind/name', got '{}'",
+            reference
+        )));
+    }
+
+    let kind_str = parts[0];
+    let name = parts[1];
+
+    if name.is_empty() {
+        return Err(ContextError::InvalidResourceRef(format!(
+            "resource name cannot be empty in '{}'",
+            reference
+        )));
+    }
+
+    let kind = match kind_str.to_lowercase().as_str() {
+        "deployment" | "deploy" => ResourceKind::Deployment,
+        "pod" | "po" => ResourceKind::Pod,
+        "service" | "svc" => ResourceKind::Service,
+        "statefulset" | "sts" => ResourceKind::StatefulSet,
+        "daemonset" | "ds" => ResourceKind::DaemonSet,
+        _ => {
+            return Err(ContextError::InvalidResourceRef(format!(
+                "unknown resource kind '{}' in '{}'",
+                kind_str, reference
+            )))
+        }
+    };
+
+    Ok((kind, name))
+}
 
 /// Test context providing K8s connection and isolated namespace
 pub struct TestContext {
@@ -57,6 +112,9 @@ pub enum ContextError {
 
     #[error("Failed to exec command: {0}")]
     ExecError(String),
+
+    #[error("Invalid resource reference: {0}")]
+    InvalidResourceRef(String),
 }
 
 impl TestContext {
@@ -309,6 +367,125 @@ impl TestContext {
 
             tokio::time::sleep(poll_interval).await;
         }
+    }
+
+    /// Wait for a resource to become ready
+    ///
+    /// Convenience method that understands common Kubernetes readiness patterns:
+    /// - `deployment/name` - waits for all replicas to be available
+    /// - `pod/name` - waits for pod to be Running with all containers ready
+    /// - `statefulset/name` - waits for all replicas to be ready
+    /// - `daemonset/name` - waits for all desired pods to be ready
+    /// - `service/name` - waits for service to exist (services are always "ready")
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.wait_ready("deployment/myapp").await?;
+    /// ctx.wait_ready("pod/worker-0").await?;
+    /// ```
+    pub async fn wait_ready(&self, resource: &str) -> Result<(), ContextError> {
+        self.wait_ready_with_timeout(resource, std::time::Duration::from_secs(60))
+            .await
+    }
+
+    /// Wait for a resource to become ready with custom timeout
+    pub async fn wait_ready_with_timeout(
+        &self,
+        resource: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), ContextError> {
+        let (kind, name) = parse_resource_ref(resource)?;
+
+        debug!(
+            namespace = %self.namespace,
+            resource = %resource,
+            timeout = ?timeout,
+            "Waiting for resource to be ready"
+        );
+
+        match kind {
+            ResourceKind::Deployment => {
+                self.wait_for_with_timeout::<Deployment, _>(
+                    name,
+                    |d| {
+                        let spec_replicas = d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+                        let ready_replicas = d
+                            .status
+                            .as_ref()
+                            .and_then(|s| s.ready_replicas)
+                            .unwrap_or(0);
+                        ready_replicas >= spec_replicas
+                    },
+                    timeout,
+                )
+                .await?;
+            }
+            ResourceKind::Pod => {
+                self.wait_for_with_timeout::<Pod, _>(
+                    name,
+                    |p| {
+                        // Pod must be Running
+                        let phase = p.status.as_ref().and_then(|s| s.phase.as_ref());
+                        if phase != Some(&"Running".to_string()) {
+                            return false;
+                        }
+                        // All containers must be ready
+                        p.status
+                            .as_ref()
+                            .and_then(|s| s.container_statuses.as_ref())
+                            .map(|containers| containers.iter().all(|c| c.ready))
+                            .unwrap_or(false)
+                    },
+                    timeout,
+                )
+                .await?;
+            }
+            ResourceKind::StatefulSet => {
+                self.wait_for_with_timeout::<StatefulSet, _>(
+                    name,
+                    |s| {
+                        let spec_replicas = s.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+                        let ready_replicas = s
+                            .status
+                            .as_ref()
+                            .and_then(|s| s.ready_replicas)
+                            .unwrap_or(0);
+                        ready_replicas >= spec_replicas
+                    },
+                    timeout,
+                )
+                .await?;
+            }
+            ResourceKind::DaemonSet => {
+                self.wait_for_with_timeout::<DaemonSet, _>(
+                    name,
+                    |d| {
+                        let desired = d
+                            .status
+                            .as_ref()
+                            .map(|s| s.desired_number_scheduled)
+                            .unwrap_or(0);
+                        let ready = d.status.as_ref().map(|s| s.number_ready).unwrap_or(0);
+                        desired > 0 && ready >= desired
+                    },
+                    timeout,
+                )
+                .await?;
+            }
+            ResourceKind::Service => {
+                // Services don't have a "ready" state - just verify it exists
+                self.get::<Service>(name).await?;
+            }
+        }
+
+        info!(
+            namespace = %self.namespace,
+            resource = %resource,
+            "Resource is ready"
+        );
+
+        Ok(())
     }
 
     /// Get events from the test namespace
@@ -1197,6 +1374,178 @@ mod tests {
         );
 
         // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    // ============================================================
+    // wait_ready() tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_resource_reference_deployment() {
+        let (kind, name) = parse_resource_ref("deployment/myapp").unwrap();
+        assert_eq!(kind, ResourceKind::Deployment);
+        assert_eq!(name, "myapp");
+    }
+
+    #[test]
+    fn test_parse_resource_reference_pod() {
+        let (kind, name) = parse_resource_ref("pod/nginx").unwrap();
+        assert_eq!(kind, ResourceKind::Pod);
+        assert_eq!(name, "nginx");
+    }
+
+    #[test]
+    fn test_parse_resource_reference_service() {
+        let (kind, name) = parse_resource_ref("svc/backend").unwrap();
+        assert_eq!(kind, ResourceKind::Service);
+        assert_eq!(name, "backend");
+    }
+
+    #[test]
+    fn test_parse_resource_reference_statefulset() {
+        let (kind, name) = parse_resource_ref("statefulset/postgres").unwrap();
+        assert_eq!(kind, ResourceKind::StatefulSet);
+        assert_eq!(name, "postgres");
+    }
+
+    #[test]
+    fn test_parse_resource_reference_daemonset() {
+        let (kind, name) = parse_resource_ref("daemonset/fluentd").unwrap();
+        assert_eq!(kind, ResourceKind::DaemonSet);
+        assert_eq!(name, "fluentd");
+    }
+
+    #[test]
+    fn test_parse_resource_reference_invalid_format() {
+        assert!(parse_resource_ref("myapp").is_err());
+        assert!(parse_resource_ref("").is_err());
+        assert!(parse_resource_ref("/myapp").is_err());
+        assert!(parse_resource_ref("deployment/").is_err());
+    }
+
+    #[test]
+    fn test_parse_resource_reference_unknown_kind() {
+        assert!(parse_resource_ref("unknown/myapp").is_err());
+    }
+
+    #[test]
+    fn test_parse_resource_reference_aliases() {
+        // deploy -> Deployment
+        let (kind, _) = parse_resource_ref("deploy/app").unwrap();
+        assert_eq!(kind, ResourceKind::Deployment);
+
+        // po -> Pod
+        let (kind, _) = parse_resource_ref("po/app").unwrap();
+        assert_eq!(kind, ResourceKind::Pod);
+
+        // service -> Service
+        let (kind, _) = parse_resource_ref("service/app").unwrap();
+        assert_eq!(kind, ResourceKind::Service);
+
+        // sts -> StatefulSet
+        let (kind, _) = parse_resource_ref("sts/app").unwrap();
+        assert_eq!(kind, ResourceKind::StatefulSet);
+
+        // ds -> DaemonSet
+        let (kind, _) = parse_resource_ref("ds/app").unwrap();
+        assert_eq!(kind, ResourceKind::DaemonSet);
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_wait_ready_deployment() {
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a simple deployment
+        let deployment = Deployment {
+            metadata: kube::api::ObjectMeta {
+                name: Some("ready-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                replicas: Some(1),
+                selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(
+                        [("app".to_string(), "ready-test".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    metadata: Some(kube::api::ObjectMeta {
+                        labels: Some(
+                            [("app".to_string(), "ready-test".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "nginx".to_string(),
+                            image: Some("nginx:alpine".to_string()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&deployment)
+            .await
+            .expect("Should apply deployment");
+
+        // wait_ready should wait until deployment is available
+        ctx.wait_ready("deployment/ready-test")
+            .await
+            .expect("Should become ready");
+
+        // Verify it's actually ready
+        let dep: Deployment = ctx.get("ready-test").await.expect("Should get deployment");
+        let status = dep.status.expect("Should have status");
+        assert_eq!(status.ready_replicas, Some(1));
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_wait_ready_pod() {
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("ready-pod".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "nginx".to_string(),
+                    image: Some("nginx:alpine".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply pod");
+
+        // wait_ready should wait until pod is Running
+        ctx.wait_ready("pod/ready-pod")
+            .await
+            .expect("Should become ready");
+
+        // Verify it's running
+        let p: Pod = ctx.get("ready-pod").await.expect("Should get pod");
+        let phase = p.status.and_then(|s| s.phase);
+        assert_eq!(phase, Some("Running".to_string()));
+
         ctx.cleanup().await.expect("Should cleanup");
     }
 }
