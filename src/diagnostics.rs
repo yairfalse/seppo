@@ -122,8 +122,9 @@ impl fmt::Display for Diagnostics {
 
                 // Truncate message if too long
                 let max_msg_len = 45;
-                let msg_display = if message.len() > max_msg_len {
-                    format!("{}...", &message[..max_msg_len])
+                let msg_display = if message.chars().count() > max_msg_len {
+                    let truncated: String = message.chars().take(max_msg_len).collect();
+                    format!("{}...", truncated)
                 } else {
                     message.to_string()
                 };
