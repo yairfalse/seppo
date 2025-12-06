@@ -73,7 +73,7 @@ pub mod telemetry;
 // Re-export commonly used types
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
-pub use context::{ContextError, TestContext};
+pub use context::{parse_resource_ref, ContextError, ResourceKind, TestContext};
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
 pub use metrics::{metrics, SeppoMetrics};
