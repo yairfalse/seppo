@@ -97,12 +97,15 @@ impl fmt::Display for Diagnostics {
             )?;
             writeln!(f)?;
 
-            // Sort events by timestamp
+            // Sort events by timestamp, placing events without timestamps at the end
             let mut events: Vec<_> = self.events.iter().collect();
-            events.sort_by(|a, b| {
-                let time_a = a.last_timestamp.as_ref().map(|t| &t.0);
-                let time_b = b.last_timestamp.as_ref().map(|t| &t.0);
-                time_a.cmp(&time_b)
+            use chrono::prelude::*;
+            events.sort_by_key(|event| {
+                // Use a far-future date for missing timestamps so they sort last
+                event.last_timestamp
+                    .as_ref()
+                    .map(|t| t.0)
+                    .unwrap_or(DateTime::<Utc>::MAX)
             });
 
             for event in events {
