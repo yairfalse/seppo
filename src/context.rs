@@ -445,8 +445,8 @@ impl TestContext {
                     name,
                     |p| {
                         // Pod must be Running
-                        let phase = p.status.as_ref().and_then(|s| s.phase.as_ref());
-                        if phase != Some(&"Running".to_string()) {
+                        let phase = p.status.as_ref().and_then(|s| s.phase.as_deref());
+                        if phase != Some("Running") {
                             return false;
                         }
                         // All containers must be ready
