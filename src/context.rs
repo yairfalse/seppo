@@ -389,7 +389,26 @@ impl TestContext {
             .await
     }
 
-    /// Wait for a resource to become ready with custom timeout
+    /// Wait for a resource to become ready with a custom timeout.
+    ///
+    /// This method behaves like [`wait_ready`](Self::wait_ready), but allows specifying
+    /// a custom timeout duration for waiting on the resource to become ready.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - Resource reference in "kind/name" format, e.g.:
+    ///   - `deployment/name` - waits for all replicas to be available
+    ///   - `pod/name` - waits for pod to be Running with all containers ready
+    ///   - `statefulset/name` - waits for all replicas to be ready
+    ///   - `daemonset/name` - waits for all desired pods to be ready
+    ///   - `service/name` - waits for service to exist (services are always "ready")
+    /// * `timeout` - Maximum duration to wait for readiness
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.wait_ready_with_timeout("deployment/myapp", std::time::Duration::from_secs(120)).await?;
+    /// ```
     pub async fn wait_ready_with_timeout(
         &self,
         resource: &str,
