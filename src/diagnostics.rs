@@ -133,7 +133,14 @@ impl fmt::Display for Diagnostics {
                     f,
                     "  • {}  {:12}  {:10}  {}",
                     timestamp,
-                    format!("{}/{}", kind, name),
+                    {
+                        let kind_name = format!("{}/{}", kind, name);
+                        if kind_name.len() > 12 {
+                            format!("{}...", &kind_name[..9])
+                        } else {
+                            kind_name
+                        }
+                    },
                     reason,
                     msg_display
                 )?;
