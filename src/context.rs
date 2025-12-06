@@ -8,11 +8,60 @@ use crate::portforward::{PortForward, PortForwardError};
 use crate::stack::{Stack, StackError};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
-use kube::api::{Api, AttachParams, DeleteParams, PostParams};
+use kube::api::{Api, AttachParams, DeleteParams, ListParams, PostParams};
 use kube::Client;
 use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
+
+/// Target for port forwarding
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardTarget {
+    /// Forward to a pod directly
+    Pod(String),
+    /// Forward to a service (finds a backing pod)
+    Service(String),
+    /// Forward to a deployment (finds a pod from the deployment)
+    Deployment(String),
+}
+
+/// Parse a port forward target like "svc/myapp" or "pod/myapp"
+///
+/// Supported formats:
+/// - `pod/name`, `po/name` → Forward to pod
+/// - `service/name`, `svc/name` → Forward to service (finds backing pod)
+/// - `deployment/name`, `deploy/name` → Forward to deployment (finds pod)
+/// - `name` → Treated as pod name (backward compatible)
+pub fn parse_forward_target(target: &str) -> Result<ForwardTarget, ContextError> {
+    if target.is_empty() {
+        return Err(ContextError::InvalidResourceRef(
+            "target cannot be empty".to_string(),
+        ));
+    }
+
+    // Check for kind/name format
+    if let Some((kind, name)) = target.split_once('/') {
+        if name.is_empty() {
+            return Err(ContextError::InvalidResourceRef(format!(
+                "resource name cannot be empty in '{}'",
+                target
+            )));
+        }
+
+        match kind.to_lowercase().as_str() {
+            "pod" | "po" => Ok(ForwardTarget::Pod(name.to_string())),
+            "service" | "svc" => Ok(ForwardTarget::Service(name.to_string())),
+            "deployment" | "deploy" => Ok(ForwardTarget::Deployment(name.to_string())),
+            _ => Err(ContextError::InvalidResourceRef(format!(
+                "unsupported resource kind '{}' for port forwarding (use pod, svc, or deployment)",
+                kind
+            ))),
+        }
+    } else {
+        // Bare name - treat as pod for backward compatibility
+        Ok(ForwardTarget::Pod(target.to_string()))
+    }
+}
 
 /// Test context providing K8s connection and isolated namespace
 pub struct TestContext {
@@ -57,6 +106,9 @@ pub enum ContextError {
 
     #[error("Failed to exec command: {0}")]
     ExecError(String),
+
+    #[error("Invalid resource reference: {0}")]
+    InvalidResourceRef(String),
 }
 
 impl TestContext {
@@ -450,6 +502,139 @@ impl TestContext {
         port: u16,
     ) -> Result<PortForward, PortForwardError> {
         PortForward::new(self.client.clone(), &self.namespace, pod_name, port).await
+    }
+
+    /// Create a port forward using kubectl-style resource references
+    ///
+    /// Supports:
+    /// - `pod/name` - forward to pod directly
+    /// - `svc/name` - forward to a pod backing the service
+    /// - `deployment/name` - forward to a pod from the deployment
+    /// - `name` - treated as pod name (backward compatible)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Forward to a service
+    /// let pf = ctx.forward_to("svc/myapp", 8080).await?;
+    ///
+    /// // Forward to a deployment
+    /// let pf = ctx.forward_to("deployment/backend", 3000).await?;
+    ///
+    /// // Forward to a pod (explicit or bare name)
+    /// let pf = ctx.forward_to("pod/worker-0", 9000).await?;
+    /// let pf = ctx.forward_to("worker-0", 9000).await?;
+    /// ```
+    pub async fn forward_to(
+        &self,
+        target: &str,
+        port: u16,
+    ) -> Result<PortForward, PortForwardError> {
+        let parsed =
+            parse_forward_target(target).map_err(|e| PortForwardError::BindError(e.to_string()))?;
+
+        let pod_name = match parsed {
+            ForwardTarget::Pod(name) => name,
+            ForwardTarget::Service(svc_name) => self
+                .find_pod_for_service(&svc_name)
+                .await
+                .map_err(|e| PortForwardError::BindError(e.to_string()))?,
+            ForwardTarget::Deployment(deploy_name) => self
+                .find_pod_for_deployment(&deploy_name)
+                .await
+                .map_err(|e| PortForwardError::BindError(e.to_string()))?,
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            target = %target,
+            resolved_pod = %pod_name,
+            port = %port,
+            "Creating port forward"
+        );
+
+        self.forward(&pod_name, port).await
+    }
+
+    /// Find a running pod backing a service
+    async fn find_pod_for_service(&self, svc_name: &str) -> Result<String, ContextError> {
+        let services: Api<Service> = Api::namespaced(self.client.clone(), &self.namespace);
+        let svc = services
+            .get(svc_name)
+            .await
+            .map_err(|e| ContextError::GetError(format!("service '{}': {}", svc_name, e)))?;
+
+        // Get the selector from the service
+        let selector = svc
+            .spec
+            .as_ref()
+            .and_then(|s| s.selector.as_ref())
+            .ok_or_else(|| {
+                ContextError::GetError(format!("service '{}' has no selector", svc_name))
+            })?;
+
+        self.find_running_pod_by_labels(selector).await
+    }
+
+    /// Find a running pod from a deployment
+    async fn find_pod_for_deployment(&self, deploy_name: &str) -> Result<String, ContextError> {
+        let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
+        let deploy = deployments
+            .get(deploy_name)
+            .await
+            .map_err(|e| ContextError::GetError(format!("deployment '{}': {}", deploy_name, e)))?;
+
+        // Get the selector from the deployment
+        let selector = deploy
+            .spec
+            .as_ref()
+            .and_then(|s| s.selector.match_labels.as_ref())
+            .ok_or_else(|| {
+                ContextError::GetError(format!("deployment '{}' has no selector", deploy_name))
+            })?;
+
+        self.find_running_pod_by_labels(selector).await
+    }
+
+    /// Find a running pod matching the given labels
+    async fn find_running_pod_by_labels(
+        &self,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<String, ContextError> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        // Build label selector string
+        let label_selector = labels
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let list_params = ListParams::default().labels(&label_selector);
+        let pod_list = pods
+            .list(&list_params)
+            .await
+            .map_err(|e| ContextError::ListError(e.to_string()))?;
+
+        // Find a running pod
+        for pod in pod_list.items {
+            let phase = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .map(|s| s.as_str());
+
+            if phase == Some("Running") {
+                if let Some(name) = pod.metadata.name {
+                    return Ok(name);
+                }
+            }
+        }
+
+        Err(ContextError::GetError(format!(
+            "no running pod found with labels: {}",
+            label_selector
+        )))
     }
 
     /// Deploy a stack of services to the test namespace
@@ -1197,6 +1382,143 @@ mod tests {
         );
 
         // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    // ============================================================
+    // forward_to() tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_forward_target_pod() {
+        let target = parse_forward_target("pod/myapp").unwrap();
+        assert_eq!(target, ForwardTarget::Pod("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_forward_target_service() {
+        let target = parse_forward_target("svc/backend").unwrap();
+        assert_eq!(target, ForwardTarget::Service("backend".to_string()));
+    }
+
+    #[test]
+    fn test_parse_forward_target_service_full() {
+        let target = parse_forward_target("service/backend").unwrap();
+        assert_eq!(target, ForwardTarget::Service("backend".to_string()));
+    }
+
+    #[test]
+    fn test_parse_forward_target_bare_name() {
+        // Bare name defaults to pod for backward compatibility
+        let target = parse_forward_target("myapp").unwrap();
+        assert_eq!(target, ForwardTarget::Pod("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_forward_target_deployment() {
+        let target = parse_forward_target("deployment/myapp").unwrap();
+        assert_eq!(target, ForwardTarget::Deployment("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_forward_target_deploy_alias() {
+        let target = parse_forward_target("deploy/myapp").unwrap();
+        assert_eq!(target, ForwardTarget::Deployment("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_parse_forward_target_invalid() {
+        assert!(parse_forward_target("").is_err());
+        assert!(parse_forward_target("unknown/myapp").is_err());
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_forward_to_pod() {
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a pod with nginx
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("forward-pod-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "nginx".to_string(),
+                    image: Some("nginx:alpine".to_string()),
+                    ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
+                        container_port: 80,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait for pod to be running
+        ctx.wait_for::<Pod, _>("forward-pod-test", |p| {
+            p.status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .is_some_and(|phase| phase == "Running")
+        })
+        .await
+        .expect("Pod should be running");
+
+        // Forward using pod/ prefix
+        let pf = ctx
+            .forward_to("pod/forward-pod-test", 80)
+            .await
+            .expect("Should create port forward");
+
+        let response = pf.get("/").await.expect("Should get response");
+        assert!(response.contains("nginx") || response.contains("Welcome"));
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_forward_to_service() {
+        use crate::stack::Stack;
+
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a deployment with service using Stack
+        let stack = Stack::new()
+            .service("forward-svc-test")
+            .image("nginx:alpine")
+            .replicas(1)
+            .port(80)
+            .build();
+
+        ctx.up(&stack).await.expect("Should deploy stack");
+
+        // Wait for deployment to be ready
+        ctx.wait_for::<Deployment, _>("forward-svc-test", |d| {
+            d.status
+                .as_ref()
+                .and_then(|s| s.ready_replicas)
+                .unwrap_or(0)
+                >= 1
+        })
+        .await
+        .expect("Deployment should be ready");
+
+        // Forward using svc/ prefix - should find a backing pod
+        let pf = ctx
+            .forward_to("svc/forward-svc-test", 80)
+            .await
+            .expect("Should create port forward to service");
+
+        let response = pf.get("/").await.expect("Should get response");
+        assert!(response.contains("nginx") || response.contains("Welcome"));
+
         ctx.cleanup().await.expect("Should cleanup");
     }
 }
