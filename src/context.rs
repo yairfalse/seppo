@@ -1401,42 +1401,42 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn test_parse_resource_reference_deployment() {
+    fn test_parse_resource_ref_deployment() {
         let (kind, name) = parse_resource_ref("deployment/myapp").unwrap();
         assert_eq!(kind, ResourceKind::Deployment);
         assert_eq!(name, "myapp");
     }
 
     #[test]
-    fn test_parse_resource_reference_pod() {
+    fn test_parse_resource_ref_pod() {
         let (kind, name) = parse_resource_ref("pod/nginx").unwrap();
         assert_eq!(kind, ResourceKind::Pod);
         assert_eq!(name, "nginx");
     }
 
     #[test]
-    fn test_parse_resource_reference_service() {
+    fn test_parse_resource_ref_service() {
         let (kind, name) = parse_resource_ref("svc/backend").unwrap();
         assert_eq!(kind, ResourceKind::Service);
         assert_eq!(name, "backend");
     }
 
     #[test]
-    fn test_parse_resource_reference_statefulset() {
+    fn test_parse_resource_ref_statefulset() {
         let (kind, name) = parse_resource_ref("statefulset/postgres").unwrap();
         assert_eq!(kind, ResourceKind::StatefulSet);
         assert_eq!(name, "postgres");
     }
 
     #[test]
-    fn test_parse_resource_reference_daemonset() {
+    fn test_parse_resource_ref_daemonset() {
         let (kind, name) = parse_resource_ref("daemonset/fluentd").unwrap();
         assert_eq!(kind, ResourceKind::DaemonSet);
         assert_eq!(name, "fluentd");
     }
 
     #[test]
-    fn test_parse_resource_reference_invalid_format() {
+    fn test_parse_resource_ref_invalid_format() {
         assert!(parse_resource_ref("myapp").is_err());
         assert!(parse_resource_ref("").is_err());
         assert!(parse_resource_ref("/myapp").is_err());
@@ -1444,12 +1444,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_resource_reference_unknown_kind() {
+    fn test_parse_resource_ref_unknown_kind() {
         assert!(parse_resource_ref("unknown/myapp").is_err());
     }
 
     #[test]
-    fn test_parse_resource_reference_aliases() {
+    fn test_parse_resource_ref_aliases() {
         // deploy -> Deployment
         let (kind, _) = parse_resource_ref("deploy/app").unwrap();
         assert_eq!(kind, ResourceKind::Deployment);
