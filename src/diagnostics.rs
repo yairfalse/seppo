@@ -99,13 +99,14 @@ impl fmt::Display for Diagnostics {
 
             // Sort events by timestamp, placing events without timestamps at the end
             let mut events: Vec<_> = self.events.iter().collect();
-            use chrono::prelude::*;
+            use k8s_openapi::chrono::{DateTime, Utc};
             events.sort_by_key(|event| {
                 // Use a far-future date for missing timestamps so they sort last
-                event.last_timestamp
+                event
+                    .last_timestamp
                     .as_ref()
                     .map(|t| t.0)
-                    .unwrap_or(DateTime::<Utc>::MAX)
+                    .unwrap_or(DateTime::<Utc>::MAX_UTC)
             });
 
             for event in events {
@@ -252,5 +253,75 @@ mod tests {
 
         // Should include cleanup command
         assert!(output.contains("kubectl delete ns seppo-test-xyz"));
+    }
+
+    #[test]
+    fn test_diagnostics_pod_names_sorted() {
+        let mut diag = Diagnostics::new("seppo-test-xyz".to_string());
+        // Insert in non-alphabetical order
+        diag.pod_logs
+            .insert("pod-c".to_string(), "log c".to_string());
+        diag.pod_logs
+            .insert("pod-a".to_string(), "log a".to_string());
+        diag.pod_logs
+            .insert("pod-b".to_string(), "log b".to_string());
+
+        let output = diag.to_string();
+
+        // pod-a should appear before pod-b, and pod-b before pod-c
+        let pos_a = output.find("[pod-a]").expect("pod-a not found");
+        let pos_b = output.find("[pod-b]").expect("pod-b not found");
+        let pos_c = output.find("[pod-c]").expect("pod-c not found");
+
+        assert!(pos_a < pos_b, "pod-a should appear before pod-b");
+        assert!(pos_b < pos_c, "pod-b should appear before pod-c");
+    }
+
+    #[test]
+    fn test_diagnostics_log_truncation() {
+        let mut diag = Diagnostics::new("seppo-test-xyz".to_string());
+
+        // Create logs with 60 lines (exceeds 50 line limit)
+        let many_lines: String = (1..=60).map(|i| format!("Line {}\n", i)).collect();
+        diag.pod_logs.insert("verbose-pod".to_string(), many_lines);
+
+        let output = diag.to_string();
+
+        // Should show truncation message
+        assert!(output.contains("... (10 more lines)"));
+        // Should contain line 50 (last shown)
+        assert!(output.contains("Line 50"));
+        // Should NOT contain line 51 (truncated)
+        assert!(!output.contains("Line 51"));
+    }
+
+    #[test]
+    fn test_diagnostics_event_message_truncation() {
+        use k8s_openapi::api::core::v1::{Event, ObjectReference};
+
+        let mut diag = Diagnostics::new("seppo-test-xyz".to_string());
+
+        // Create event with very long message (>45 chars)
+        let long_message = "This is a very long error message that definitely exceeds the forty-five character limit and should be truncated";
+        let event = Event {
+            reason: Some("Error".to_string()),
+            message: Some(long_message.to_string()),
+            involved_object: ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("test".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        diag.events.push(event);
+
+        let output = diag.to_string();
+
+        // Should be truncated with ...
+        assert!(output.contains("..."));
+        // Should NOT contain the full message
+        assert!(!output.contains("should be truncated"));
+        // Should contain the beginning
+        assert!(output.contains("This is a very long"));
     }
 }
