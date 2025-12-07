@@ -1427,9 +1427,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_forward_target_po_alias() {
+        let target = parse_forward_target("po/myapp").unwrap();
+        assert_eq!(target, ForwardTarget::Pod("myapp".to_string()));
+    }
+
+    #[test]
     fn test_parse_forward_target_invalid() {
         assert!(parse_forward_target("").is_err());
         assert!(parse_forward_target("unknown/myapp").is_err());
+        // Empty resource names should fail
+        assert!(parse_forward_target("pod/").is_err());
+        assert!(parse_forward_target("svc/").is_err());
     }
 
     #[tokio::test]
