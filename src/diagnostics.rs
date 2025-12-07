@@ -121,6 +121,21 @@ impl fmt::Display for Diagnostics {
                 let reason = event.reason.as_deref().unwrap_or("Unknown");
                 let message = event.message.as_deref().unwrap_or("");
 
+                // Truncate kind/name to fit column (12 chars)
+                let kind_name = format!("{}/{}", kind, name);
+                let kind_name_display = if kind_name.len() > 12 {
+                    format!("{}...", &kind_name[..9])
+                } else {
+                    kind_name
+                };
+
+                // Truncate reason to fit column (10 chars)
+                let reason_display = if reason.len() > 10 {
+                    format!("{}...", &reason[..7])
+                } else {
+                    reason.to_string()
+                };
+
                 // Truncate message if too long
                 let max_msg_len = 45;
                 let msg_display = if message.chars().count() > max_msg_len {
@@ -133,17 +148,7 @@ impl fmt::Display for Diagnostics {
                 writeln!(
                     f,
                     "  • {}  {:12}  {:10}  {}",
-                    timestamp,
-                    {
-                        let kind_name = format!("{}/{}", kind, name);
-                        if kind_name.len() > 12 {
-                            format!("{}...", &kind_name[..9])
-                        } else {
-                            kind_name
-                        }
-                    },
-                    reason,
-                    msg_display
+                    timestamp, kind_name_display, reason_display, msg_display
                 )?;
             }
         }
@@ -323,5 +328,35 @@ mod tests {
         assert!(!output.contains("should be truncated"));
         // Should contain the beginning
         assert!(output.contains("This is a very long"));
+    }
+
+    #[test]
+    fn test_diagnostics_event_field_truncation() {
+        use k8s_openapi::api::core::v1::{Event, ObjectReference};
+
+        let mut diag = Diagnostics::new("seppo-test-xyz".to_string());
+
+        // Create event with long kind/name (>12 chars) and long reason (>10 chars)
+        let event = Event {
+            reason: Some("VeryLongReasonName".to_string()), // 18 chars, exceeds 10
+            message: Some("test message".to_string()),
+            involved_object: ObjectReference {
+                kind: Some("Deployment".to_string()),
+                name: Some("my-very-long-deployment-name".to_string()), // total >12 chars
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        diag.events.push(event);
+
+        let output = diag.to_string();
+
+        // Long kind/name should be truncated
+        assert!(!output.contains("my-very-long-deployment-name"));
+        assert!(output.contains("Deploymen...")); // truncated to 9 chars + ...
+
+        // Long reason should be truncated
+        assert!(!output.contains("VeryLongReasonName"));
+        assert!(output.contains("VeryLon...")); // truncated to 7 chars + ...
     }
 }
