@@ -1,201 +1,243 @@
-# Seppo
+# seppo
 
-Kubernetes testing SDK. Native library, no config files.
+**Kubernetes testing in Rust. No YAML. No CLI. Just code.**
 
-**Status:** Testing CI/CD workflow (Option 3: Just + Act)
+```rust
+#[seppo::test]
+async fn test_my_app(ctx: TestContext) {
+    // Deploy
+    ctx.apply(&my_deployment).await?;
+    ctx.wait_ready("deployment/myapp").await?;
 
-## What it does
+    // Test
+    let pf = ctx.forward_to("svc/myapp", 8080).await?;
+    let resp = pf.get("/health").await?;
+    assert!(resp.contains("ok"));
+}
+```
+
+Run `cargo test`. Done.
+
+---
+
+## Why
+
+Kubernetes testing tooling today means YAML fixtures, bash scripts, and complex test frameworks that don't integrate with your language. You end up with a parallel testing infrastructure that's harder to maintain than the code it tests.
+
+Seppo is a native Rust library. Your tests are Rust code. They run with `cargo test`. No external tools, no configuration languages, no impedance mismatch.
+
+- **No YAML** — define resources in Rust
+- **No CLI** — library, not a tool
+- **No framework** — works with `cargo test`
+- **Native kube-rs** — not kubectl shelling
+
+---
+
+## How It Works
 
 ```
-Code -> Cluster -> Environment -> Tests -> Results
+┌──────────────────┐     ┌─────────────────┐     ┌──────────────┐
+│  #[seppo::test]  │────▶│   TestContext   │────▶│  Kubernetes  │
+│   your test fn   │     │   (namespace)   │     │   (Kind/EKS) │
+└──────────────────┘     └─────────────────┘     └──────────────┘
+         │                       │
+         │                       ├── apply()      → create resources
+         │                       ├── wait_ready() → poll until ready
+         │                       ├── forward_to() → port forward
+         │                       ├── exec()       → run commands
+         │                       └── up()         → deploy stacks
+         │
+         └── on success: cleanup namespace
+             on failure: keep namespace + dump diagnostics
 ```
 
-1. **Cluster**: Create Kind/Minikube or use existing
-2. **Environment**: Load images, apply manifests, wait for readiness
-3. **Tests**: Run your test commands
-4. **Results**: Pass/fail with timing
+Each test gets an isolated namespace. Resources are created with `kube-rs`. On failure, Seppo dumps pod logs and events, then keeps the namespace for debugging.
 
-## Quick Start
+---
+
+## Install
 
 ```toml
 [dev-dependencies]
 seppo = "0.1"
-tokio = { version = "1", features = ["full"] }
 ```
 
+Requires: Docker + [Kind](https://kind.sigs.k8s.io/) (or existing cluster)
+
+---
+
+## Usage
+
+### Basic Test
+
 ```rust
-use seppo::{ClusterConfig, EnvironmentConfig, WaitCondition, Config, setup};
+use seppo::TestContext;
+use k8s_openapi::api::core::v1::ConfigMap;
 
-#[tokio::test]
-async fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
-    // Define cluster
-    let cluster = ClusterConfig::kind("my-test")
-        .workers(2);
+#[seppo::test]
+async fn test_configmap(ctx: TestContext) {
+    let cm = ConfigMap {
+        metadata: kube::api::ObjectMeta {
+            name: Some("myconfig".into()),
+            ..Default::default()
+        },
+        data: Some([("key".into(), "value".into())].into()),
+        ..Default::default()
+    };
 
-    // Define environment
-    let env = EnvironmentConfig::new()
-        .image("myapp:test")
-        .manifest("./k8s/deployment.yaml")
-        .wait(WaitCondition::available("deployment/myapp"));
+    ctx.apply(&cm).await.unwrap();
 
-    // Setup
-    let config = Config::new(cluster).environment(env);
-    setup(&config).await?;
-
-    // Run tests
-    let result = seppo::run("cargo", &["test", "--", "--ignored"]).await?;
-    assert!(result.passed());
-
-    Ok(())
+    let fetched: ConfigMap = ctx.get("myconfig").await.unwrap();
+    assert_eq!(fetched.data.unwrap()["key"], "value");
 }
 ```
 
-## Providers
-
-| Provider | Use Case |
-|----------|----------|
-| `kind` | Local dev, CI (Docker-based) |
-| `minikube` | Local dev with VM drivers |
-| `existing` | Use your own cluster |
-
-### Kind (default)
+### Wait for Resources
 
 ```rust
-let cluster = ClusterConfig::kind("test")
-    .workers(2)
-    .k8s_version("1.31.0");
+#[seppo::test]
+async fn test_deployment(ctx: TestContext) {
+    ctx.apply(&deployment).await?;
+
+    // Wait until ready (understands K8s semantics)
+    ctx.wait_ready("deployment/myapp").await?;
+    ctx.wait_ready("pod/worker-0").await?;
+    ctx.wait_ready("svc/backend").await?;
+}
 ```
 
-### Minikube
+### Port Forward & HTTP
 
 ```rust
-let cluster = ClusterConfig::minikube("test")
-    .driver("docker");  // or hyperkit, virtualbox
+#[seppo::test]
+async fn test_api(ctx: TestContext) {
+    ctx.apply(&deployment).await?;
+    ctx.wait_ready("deployment/myapp").await?;
+
+    // Forward to service (finds backing pod automatically)
+    let pf = ctx.forward_to("svc/myapp", 8080).await?;
+
+    let health = pf.get("/health").await?;
+    assert!(health.contains("ok"));
+}
 ```
 
-### Existing Cluster
+### Deploy Stacks
 
 ```rust
-let cluster = ClusterConfig::existing("my-cluster")
-    .kubeconfig("~/.kube/config")
-    .context("my-context");
+use seppo::Stack;
+
+#[seppo::test]
+async fn test_full_stack(ctx: TestContext) {
+    let stack = Stack::new()
+        .service("frontend")
+            .image("fe:test")
+            .replicas(2)
+            .port(80)
+        .service("backend")
+            .image("be:test")
+            .replicas(1)
+            .port(8080)
+        .service("worker")
+            .image("worker:test")
+            .replicas(3)
+        .build();
+
+    ctx.up(&stack).await?;
+
+    // All services deployed concurrently
+}
 ```
 
-## API
-
-### Simple API (Kind only)
+### Exec Commands
 
 ```rust
-use seppo::cluster;
+#[seppo::test]
+async fn test_exec(ctx: TestContext) {
+    ctx.apply(&pod).await?;
+    ctx.wait_ready("pod/myapp").await?;
 
-cluster::create("test").await?;
-cluster::load_image("test", "myapp:v1").await?;
-cluster::delete("test").await?;
+    let output = ctx.exec("myapp", &["cat", "/etc/config"]).await?;
+    assert!(output.contains("expected"));
+}
 ```
 
-### Multi-Provider
+---
 
-```rust
-use seppo::{ClusterConfig, get_provider};
+## Failure Diagnostics
 
-let config = ClusterConfig::kind("test").workers(2);
-let provider = get_provider(&config)?;
+When tests fail, Seppo keeps the namespace and dumps diagnostics:
 
-provider.create(&config).await?;
-provider.load_image("test", "myapp:v1").await?;
-provider.delete("test").await?;
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SEPPO TEST FAILED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Namespace: seppo-test-a1b2c3d4 (kept for debugging)
+
+─── Pod Logs ───────────────────────────────────────────────────
+[myapp-xyz123]
+  ERROR: Connection refused to postgres:5432
+
+─── Events (2) ─────────────────────────────────────────────────
+  • 10:42:00  Pod/myapp  Scheduled  Assigned to node-1
+  • 10:42:01  Pod/myapp  BackOff    Image pull error
+
+─── Debug ──────────────────────────────────────────────────────
+  kubectl -n seppo-test-a1b2c3d4 get all
+  kubectl delete ns seppo-test-a1b2c3d4  # cleanup
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### Environment Setup
+Set `SEPPO_KEEP_ALL=true` to keep namespaces even on success.
 
-```rust
-use seppo::{ClusterConfig, EnvironmentConfig, WaitCondition, Config, setup};
+---
 
-let config = Config::new(ClusterConfig::kind("test"))
-    .environment(
-        EnvironmentConfig::new()
-            .image("myapp:test")
-            .manifest("./k8s/namespace.yaml")
-            .manifest("./k8s/deployment.yaml")
-            .wait(
-                WaitCondition::available("deployment/myapp")
-                    .namespace("test")
-                    .timeout_secs(120)
-            )
-            .setup_script("./scripts/setup.sh")
-    );
+## Features
 
-let result = setup(&config).await?;
-println!("Images loaded: {:?}", result.images_loaded);
-println!("Manifests applied: {:?}", result.manifests_applied);
+| Feature | Status |
+|---------|--------|
+| `#[seppo::test]` macro | Done |
+| Isolated namespaces | Done |
+| apply/get/delete/list | Done |
+| wait_ready() | Done |
+| forward_to() (svc/deploy/pod) | Done |
+| exec() | Done |
+| Stack builder | Done |
+| Failure diagnostics | Done |
+| OpenTelemetry integration | Done |
+| Kind provider | Done |
+| Minikube provider | Done |
+| Existing cluster provider | Done |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  cargo test                                                     │
+│    └── #[tokio::test]  → async runtime                          │
+│    └── #[sqlx::test]   → database connection                    │
+│    └── #[seppo::test]  → kubernetes cluster                     │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Your Machine / CI                      Kubernetes Cluster      │
+│  ┌──────────────────┐                  ┌──────────────────┐    │
+│  │ cargo test       │ ───kube-rs────▶  │ Kind / EKS / GKE │    │
+│  │ (seppo)          │                  │                  │    │
+│  └──────────────────┘                  └──────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Test Runner
+---
 
-```rust
-use seppo::{run, run_with_env};
-use std::collections::HashMap;
+## Name
 
-// Run command
-let result = run("pytest", &["-v", "tests/"]).await?;
-println!("Exit code: {}", result.exit_code);
-println!("Stdout: {}", result.stdout);
+*Seppo* — Finnish name. The everyman. Like your tests: reliable, unpretentious, gets the job done.
 
-// With environment variables
-let mut env = HashMap::new();
-env.insert("KUBECONFIG".into(), "/tmp/kubeconfig".into());
-let result = run_with_env("go", &["test", "./..."], &env).await?;
-```
-
-## Telemetry
-
-Seppo exports OpenTelemetry traces and metrics.
-
-```rust
-use seppo::{TelemetryConfig, init_telemetry};
-
-let config = TelemetryConfig::from_env();
-let _guard = init_telemetry(&config)?;
-
-// Spans and metrics exported to OTLP endpoint
-```
-
-### Environment Variables
-
-```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-SEPPO_SERVICE_NAME=seppo
-SEPPO_TELEMETRY_ENABLED=true
-```
-
-### Metrics
-
-- `seppo_clusters_created_total`
-- `seppo_tests_executed_total`
-- `seppo_tests_passed_total`
-- `seppo_tests_failed_total`
-- `seppo_test_duration_ms`
-
-## Requirements
-
-- Rust 1.70+
-- Docker (for Kind)
-- `kind` CLI: https://kind.sigs.k8s.io/
-- `minikube` CLI (optional): https://minikube.sigs.k8s.io/
-- `kubectl`: https://kubernetes.io/docs/tasks/tools/
-
-## Development
-
-```bash
-# Run tests
-cargo test
-
-# Run with real cluster (slow)
-cargo test -- --ignored
-
-# Lint
-cargo clippy --all-targets
-```
+---
 
 ## License
 
