@@ -453,7 +453,9 @@ impl TestContext {
                         p.status
                             .as_ref()
                             .and_then(|s| s.container_statuses.as_ref())
-                            .map(|containers| !containers.is_empty() && containers.iter().all(|c| c.ready))
+                            .map(|containers| {
+                                !containers.is_empty() && containers.iter().all(|c| c.ready)
+                            })
                             .unwrap_or(false)
                     },
                     timeout,
