@@ -570,6 +570,12 @@ impl TestContext {
     /// ctx.scale("deployment/myapp", 0).await?;
     /// ```
     pub async fn scale(&self, resource: &str, replicas: i32) -> Result<(), ContextError> {
+        if replicas < 0 {
+            return Err(ContextError::InvalidResourceRef(format!(
+                "replicas must be non-negative, got {}",
+                replicas
+            )));
+        }
         let (kind, name) = parse_resource_ref(resource)?;
 
         match kind {
