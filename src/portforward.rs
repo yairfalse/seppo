@@ -136,34 +136,7 @@ impl PortForward {
     /// are not supported - use `local_addr()` with your own HTTP client
     /// for binary data.
     pub async fn get(&self, path: &str) -> Result<String, PortForwardError> {
-        // Simple HTTP/1.1 GET request
-        let mut stream = tokio::net::TcpStream::connect(self.local_addr)
-            .await
-            .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
-
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, self.local_addr
-        );
-
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
-
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .await
-            .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
-
-        debug!(
-            local_addr = %self.local_addr,
-            path = %path,
-            "HTTP GET completed"
-        );
-
-        Ok(extract_body(&response))
+        self.request("GET", path, None).await
     }
 
     /// Make an HTTP POST request through the port forward
@@ -183,6 +156,12 @@ impl PortForward {
     }
 
     /// Make an HTTP PUT request through the port forward
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let response = pf.put("/api/users/1", "application/json", r#"{"name":"updated"}"#).await?;
+    /// ```
     pub async fn put(
         &self,
         path: &str,
