@@ -165,6 +165,81 @@ impl PortForward {
 
         Ok(extract_body(&response))
     }
+
+    /// Make an HTTP POST request through the port forward
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let response = pf.post("/api/users", "application/json", r#"{"name":"test"}"#).await?;
+    /// ```
+    pub async fn post(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<String, PortForwardError> {
+        self.request("POST", path, Some((content_type, body))).await
+    }
+
+    /// Make an HTTP PUT request through the port forward
+    pub async fn put(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<String, PortForwardError> {
+        self.request("PUT", path, Some((content_type, body))).await
+    }
+
+    /// Make an HTTP DELETE request through the port forward
+    pub async fn delete(&self, path: &str) -> Result<String, PortForwardError> {
+        self.request("DELETE", path, None).await
+    }
+
+    /// Make a generic HTTP request
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<(&str, &str)>, // (content_type, body)
+    ) -> Result<String, PortForwardError> {
+        let mut stream = tokio::net::TcpStream::connect(self.local_addr)
+            .await
+            .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
+
+        let request = if let Some((content_type, body_content)) = body {
+            format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                method, path, self.local_addr, content_type, body_content.len(), body_content
+            )
+        } else {
+            format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                method, path, self.local_addr
+            )
+        };
+
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
+
+        debug!(
+            local_addr = %self.local_addr,
+            method = %method,
+            path = %path,
+            "HTTP request completed"
+        );
+
+        Ok(extract_body(&response))
+    }
 }
 
 /// Extract the body from an HTTP response
