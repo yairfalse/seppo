@@ -558,6 +558,58 @@ impl TestContext {
         Ok(())
     }
 
+    /// Scale a deployment to the specified number of replicas
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Scale up
+    /// ctx.scale("deployment/myapp", 3).await?;
+    ///
+    /// // Scale down to zero
+    /// ctx.scale("deployment/myapp", 0).await?;
+    /// ```
+    pub async fn scale(&self, resource: &str, replicas: i32) -> Result<(), ContextError> {
+        let (kind, name) = parse_resource_ref(resource)?;
+
+        match kind {
+            ResourceKind::Deployment => {
+                let deployments: Api<Deployment> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+
+                // Get current deployment
+                let mut dep = deployments
+                    .get(name)
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                // Update replicas
+                if let Some(ref mut spec) = dep.spec {
+                    spec.replicas = Some(replicas);
+                }
+
+                // Apply update
+                deployments
+                    .replace(name, &PostParams::default(), &dep)
+                    .await
+                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    deployment = %name,
+                    replicas = %replicas,
+                    "Scaled deployment"
+                );
+
+                Ok(())
+            }
+            _ => Err(ContextError::InvalidResourceRef(format!(
+                "scale only supports deployments, got {:?}",
+                kind
+            ))),
+        }
+    }
+
     /// Get events from the test namespace
     ///
     /// Returns all events in the namespace, useful for debugging test failures.
@@ -1894,6 +1946,78 @@ mod tests {
 
         let response = pf.get("/").await.expect("Should get response");
         assert!(response.contains("nginx") || response.contains("Welcome"));
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    // ============================================================
+    // scale() tests
+    // ============================================================
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_scale_deployment() {
+        let ctx = TestContext::new().await.expect("Should create context");
+
+        // Create a deployment with 1 replica
+        let deployment = Deployment {
+            metadata: kube::api::ObjectMeta {
+                name: Some("scale-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                replicas: Some(1),
+                selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(
+                        [("app".to_string(), "scale-test".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    metadata: Some(kube::api::ObjectMeta {
+                        labels: Some(
+                            [("app".to_string(), "scale-test".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "nginx".to_string(),
+                            image: Some("nginx:alpine".to_string()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&deployment)
+            .await
+            .expect("Should apply deployment");
+
+        // Scale up to 3
+        ctx.scale("deployment/scale-test", 3)
+            .await
+            .expect("Should scale up");
+
+        // Verify
+        let dep: Deployment = ctx.get("scale-test").await.expect("Should get deployment");
+        assert_eq!(dep.spec.as_ref().unwrap().replicas, Some(3));
+
+        // Scale down to 0
+        ctx.scale("deployment/scale-test", 0)
+            .await
+            .expect("Should scale down");
+
+        let dep: Deployment = ctx.get("scale-test").await.expect("Should get deployment");
+        assert_eq!(dep.spec.as_ref().unwrap().replicas, Some(0));
 
         ctx.cleanup().await.expect("Should cleanup");
     }
