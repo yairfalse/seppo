@@ -193,6 +193,12 @@ impl PortForward {
     }
 
     /// Make an HTTP DELETE request through the port forward
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let response = pf.delete("/api/users/1").await?;
+    /// ```
     pub async fn delete(&self, path: &str) -> Result<String, PortForwardError> {
         self.request("DELETE", path, None).await
     }
