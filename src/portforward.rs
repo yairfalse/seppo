@@ -136,15 +136,74 @@ impl PortForward {
     /// are not supported - use `local_addr()` with your own HTTP client
     /// for binary data.
     pub async fn get(&self, path: &str) -> Result<String, PortForwardError> {
-        // Simple HTTP/1.1 GET request
+        self.request("GET", path, None).await
+    }
+
+    /// Make an HTTP POST request through the port forward
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let response = pf.post("/api/users", "application/json", r#"{"name":"test"}"#).await?;
+    /// ```
+    pub async fn post(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<String, PortForwardError> {
+        self.request("POST", path, Some((content_type, body))).await
+    }
+
+    /// Make an HTTP PUT request through the port forward
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let response = pf.put("/api/users/1", "application/json", r#"{"name":"updated"}"#).await?;
+    /// ```
+    pub async fn put(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<String, PortForwardError> {
+        self.request("PUT", path, Some((content_type, body))).await
+    }
+
+    /// Make an HTTP DELETE request through the port forward
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let response = pf.delete("/api/users/1").await?;
+    /// ```
+    pub async fn delete(&self, path: &str) -> Result<String, PortForwardError> {
+        self.request("DELETE", path, None).await
+    }
+
+    /// Make a generic HTTP request
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<(&str, &str)>, // (content_type, body)
+    ) -> Result<String, PortForwardError> {
         let mut stream = tokio::net::TcpStream::connect(self.local_addr)
             .await
             .map_err(|e| PortForwardError::RequestError(e.to_string()))?;
 
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, self.local_addr
-        );
+        let request = if let Some((content_type, body_content)) = body {
+            format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                method, path, self.local_addr, content_type, body_content.len(), body_content
+            )
+        } else {
+            format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                method, path, self.local_addr
+            )
+        };
 
         stream
             .write_all(request.as_bytes())
@@ -159,8 +218,9 @@ impl PortForward {
 
         debug!(
             local_addr = %self.local_addr,
+            method = %method,
             path = %path,
-            "HTTP GET completed"
+            "HTTP request completed"
         );
 
         Ok(extract_body(&response))
