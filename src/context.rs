@@ -584,9 +584,10 @@ impl TestContext {
                     .map_err(|e| ContextError::GetError(e.to_string()))?;
 
                 // Update replicas
-                if let Some(ref mut spec) = dep.spec {
-                    spec.replicas = Some(replicas);
-                }
+                let spec = dep.spec.as_mut().ok_or_else(|| {
+                    ContextError::ApplyError(format!("deployment '{}' has no spec", name))
+                })?;
+                spec.replicas = Some(replicas);
 
                 // Apply update
                 deployments
