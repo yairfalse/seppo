@@ -118,7 +118,7 @@ impl DeploymentFixture {
     /// Panics if port is not in the valid range (1-65535)
     pub fn port(mut self, port: i32) -> Self {
         assert!(
-            port >= 1 && port <= 65535,
+            (1..=65535).contains(&port),
             "port must be in range 1-65535, got {}",
             port
         );
@@ -370,12 +370,12 @@ impl ServiceFixture {
     /// Panics if port or target_port is not in the valid range (1-65535)
     pub fn port(mut self, port: i32, target_port: i32) -> Self {
         assert!(
-            port >= 1 && port <= 65535,
+            (1..=65535).contains(&port),
             "port must be in range 1-65535, got {}",
             port
         );
         assert!(
-            target_port >= 1 && target_port <= 65535,
+            (1..=65535).contains(&target_port),
             "target_port must be in range 1-65535, got {}",
             target_port
         );
@@ -658,10 +658,7 @@ mod tests {
             .port(80, 8080)
             .build();
 
-        assert_eq!(
-            service.metadata.namespace,
-            Some("my-namespace".to_string())
-        );
+        assert_eq!(service.metadata.namespace, Some("my-namespace".to_string()));
     }
 
     #[test]
@@ -691,15 +688,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "port must be in range 1-65535")]
     fn test_service_invalid_port_panics() {
-        ServiceFixture::new("my-service")
-            .port(0, 8080);
+        ServiceFixture::new("my-service").port(0, 8080);
     }
 
     #[test]
     #[should_panic(expected = "target_port must be in range 1-65535")]
     fn test_service_invalid_target_port_panics() {
-        ServiceFixture::new("my-service")
-            .port(80, 0);
+        ServiceFixture::new("my-service").port(80, 0);
     }
 
     #[test]

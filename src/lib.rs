@@ -1,6 +1,6 @@
-//! Seppo - Kubernetes Testing SDK
+//! Seppo - Kubernetes SDK
 //!
-//! A native Rust library for Kubernetes integration testing.
+//! A native Rust library for Kubernetes operations.
 //! No config files, just code.
 //!
 //! # Example
@@ -70,9 +70,9 @@ pub mod metrics;
 pub mod portforward;
 pub mod provider;
 pub mod runner;
-pub mod scenario;
 pub mod stack;
 pub mod telemetry;
+pub mod traffic;
 pub mod wait;
 
 // Re-export commonly used types
@@ -93,9 +93,9 @@ pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
 };
 pub use runner::{run, run_with_env, RunResult, RunnerError};
-pub use scenario::{Scenario, ScenarioError, Steps};
 pub use stack::{ServiceBuilder, Stack, StackError};
 pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
+pub use traffic::{HttpAssert, RequestRecord, TrafficError, TrafficRecorder};
 pub use wait::{ResourceState, WaitError, WaitEvent};
 
 // Re-export proc macros
