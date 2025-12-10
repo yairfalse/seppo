@@ -17,6 +17,7 @@
 //! eventually(|| async { check_something().await })
 //!     .timeout(Duration::from_secs(60))
 //!     .interval(Duration::from_millis(500))
+//!     .await_condition()
 //!     .await?;
 //!
 //! // Verify condition stays true
