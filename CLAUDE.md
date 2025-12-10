@@ -103,8 +103,8 @@ impl Context {
     pub async fn events(&self) -> Result<Vec<Event>>;
 
     // Network
-    pub async fn forward(&self, pod: &str, port: u16) -> PortForward;
-    pub async fn forward_to(&self, target: &str, port: u16) -> PortForward;
+    pub async fn forward(&self, pod: &str, port: u16) -> Result<PortForward, PortForwardError>;
+    pub async fn forward_to(&self, target: &str, port: u16) -> Result<PortForward, PortForwardError>;
     pub async fn exec(&self, pod: &str, cmd: &[&str]) -> Result<String>;
 
     // Stack deployment
