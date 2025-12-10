@@ -33,9 +33,6 @@ use tokio::time::{sleep, Instant};
 /// Error type for eventually/consistently operations
 #[derive(Debug, thiserror::Error)]
 pub enum ConditionError {
-    #[error("condition not met within {0:?}")]
-    Timeout(Duration),
-
     #[error("condition failed after {attempts} attempts over {elapsed:?}: {last_error}")]
     EventuallyFailed {
         attempts: u32,
