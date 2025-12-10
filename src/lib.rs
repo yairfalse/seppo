@@ -80,12 +80,9 @@ pub use assertions::{AssertionError, DeploymentAssertion, PodAssertion, ServiceA
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
 pub use context::{
-    parse_forward_target, parse_resource_ref, Context, ContextError, ForwardTarget, ResourceKind,
+    parse_forward_target, parse_resource_ref, ContextError, ForwardTarget, ResourceKind,
+    TestContext,
 };
-
-// Backward compatibility alias
-#[allow(deprecated)]
-pub use context::TestContext;
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
 pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};

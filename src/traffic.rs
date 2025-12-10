@@ -5,22 +5,22 @@
 //! # Example
 //!
 //! ```ignore
-//! use seppo::traffic::{HttpAssert, TrafficTest};
+//! use seppo::traffic::{HttpAssert, TrafficRecorder};
+//! use std::time::Duration;
 //!
 //! // Assert on a single response
 //! let response = pf.get("/health").await?;
 //! HttpAssert::new(&response)
-//!     .status_ok()
+//!     .is_json()
 //!     .contains_json("status", "healthy")
-//!     .assert();
+//!     .not_contains("error")
+//!     .result()?;
 //!
-//! // Run a traffic test
-//! TrafficTest::new(pf)
-//!     .get("/api/users")
-//!     .expect_status(200)
-//!     .expect_json_path("$.users")
-//!     .run()
-//!     .await?;
+//! // Record traffic for analysis
+//! let mut recorder = TrafficRecorder::new();
+//! recorder.record("GET", "/api/users", "[]", Duration::from_millis(50));
+//! println!("Total requests: {}", recorder.count());
+//! println!("Avg duration: {:?}", recorder.avg_duration());
 //! ```
 
 use std::time::Duration;
@@ -100,9 +100,7 @@ impl<'a> HttpAssert<'a> {
 
     /// Assert the response is valid JSON
     pub fn is_json(mut self) -> Self {
-        // Simple check - starts with { or [
-        let trimmed = self.response.trim();
-        if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        if serde_json::from_str::<serde_json::Value>(self.response).is_err() {
             self.errors.push(format!(
                 "expected valid JSON, got: {}",
                 truncate(self.response, 50)
@@ -395,5 +393,59 @@ mod tests {
     fn test_truncate() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("this is a long string", 10), "this is a ...");
+    }
+
+    #[test]
+    #[should_panic(expected = "HTTP assertion failed")]
+    fn test_http_assert_assert_panics() {
+        HttpAssert::new("actual").equals("expected").assert();
+    }
+
+    #[test]
+    fn test_traffic_recorder_requests() {
+        let mut recorder = TrafficRecorder::new();
+        recorder.record("GET", "/health", "ok", Duration::from_millis(10));
+        recorder.record("POST", "/api", "{}", Duration::from_millis(20));
+
+        let requests = recorder.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/health");
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].path, "/api");
+    }
+
+    #[test]
+    fn test_traffic_recorder_clear() {
+        let mut recorder = TrafficRecorder::new();
+        recorder.record("GET", "/health", "ok", Duration::from_millis(10));
+        recorder.record("POST", "/api", "{}", Duration::from_millis(20));
+
+        assert_eq!(recorder.count(), 2);
+
+        recorder.clear();
+
+        assert_eq!(recorder.count(), 0);
+        assert!(recorder.requests().is_empty());
+        assert!(recorder.by_method("GET").is_empty());
+    }
+
+    #[test]
+    fn test_is_json_validates_properly() {
+        // Valid JSON
+        assert!(HttpAssert::new(r#"{"key": "value"}"#)
+            .is_json()
+            .result()
+            .is_ok());
+        assert!(HttpAssert::new(r#"[1, 2, 3]"#).is_json().result().is_ok());
+        assert!(HttpAssert::new(r#"null"#).is_json().result().is_ok());
+        assert!(HttpAssert::new(r#"true"#).is_json().result().is_ok());
+        assert!(HttpAssert::new(r#""string""#).is_json().result().is_ok());
+        assert!(HttpAssert::new(r#"123"#).is_json().result().is_ok());
+
+        // Invalid JSON - these should fail
+        assert!(HttpAssert::new("{invalid").is_json().result().is_err());
+        assert!(HttpAssert::new("[not json").is_json().result().is_err());
+        assert!(HttpAssert::new("plain text").is_json().result().is_err());
     }
 }
