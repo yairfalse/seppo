@@ -63,6 +63,7 @@ pub mod config;
 pub mod context;
 pub mod diagnostics;
 pub mod environment;
+pub mod fixtures;
 pub mod metrics;
 pub mod portforward;
 pub mod provider;
@@ -79,6 +80,7 @@ pub use context::{
 };
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
+pub use fixtures::{DeploymentFixture, PodFixture, ServiceFixture};
 pub use metrics::{metrics, SeppoMetrics};
 pub use portforward::{PortForward, PortForwardError};
 pub use provider::{
