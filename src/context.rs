@@ -981,6 +981,54 @@ impl TestContext {
 
         Ok(())
     }
+
+    /// Create a pod assertion builder
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.assert_pod("my-pod").is_running().await?;
+    /// ctx.assert_pod("my-pod").has_label("app", "myapp").await?;
+    /// ```
+    pub fn assert_pod(&self, name: &str) -> crate::assertions::PodAssertion {
+        crate::assertions::PodAssertion::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            name.to_string(),
+        )
+    }
+
+    /// Create a deployment assertion builder
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.assert_deployment("my-app").has_replicas(3).await?;
+    /// ctx.assert_deployment("my-app").is_available().await?;
+    /// ```
+    pub fn assert_deployment(&self, name: &str) -> crate::assertions::DeploymentAssertion {
+        crate::assertions::DeploymentAssertion::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            name.to_string(),
+        )
+    }
+
+    /// Create a service assertion builder
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.assert_service("my-svc").has_port(8080).await?;
+    /// ctx.assert_service("my-svc").is_cluster_ip().await?;
+    /// ```
+    pub fn assert_service(&self, name: &str) -> crate::assertions::ServiceAssertion {
+        crate::assertions::ServiceAssertion::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            name.to_string(),
+        )
+    }
 }
 
 #[cfg(test)]

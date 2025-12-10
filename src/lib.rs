@@ -58,6 +58,7 @@
 //! - **Minikube**: Local VM-based clusters
 //! - **Existing**: Use pre-existing clusters
 
+pub mod assertions;
 pub mod cluster;
 pub mod config;
 pub mod context;
@@ -71,6 +72,7 @@ pub mod stack;
 pub mod telemetry;
 
 // Re-export commonly used types
+pub use assertions::{AssertionError, DeploymentAssertion, PodAssertion, ServiceAssertion};
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
 pub use context::{
