@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use seppo::assertions::AssertPod;
+//! use seppo::assertions::PodAssertion;
 //!
 //! // Assert pod state
 //! ctx.assert_pod("my-pod").is_running().await?;
