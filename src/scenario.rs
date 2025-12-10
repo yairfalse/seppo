@@ -151,6 +151,12 @@ impl<T: Send + 'static> Scenario<T> {
             }
         }
 
+        // If a 'then' assertion was defined but no 'when' result was available, report error
+        if self.then.is_some() && result.is_none() {
+            return Err(ScenarioError::AssertionFailed(
+                "Then assertion defined but no result from When step to assert on".to_string(),
+            ));
+        }
         println!("   ✅ Scenario passed\n");
         Ok(())
     }
