@@ -1,35 +1,38 @@
 # seppo
 
-**Kubernetes testing in Rust. No YAML. No CLI. Just code.**
+**Kubernetes SDK for Rust. No YAML. No CLI. Just code.**
 
 ```rust
+use seppo::Context;
+
+// Standalone
+let ctx = Context::new().await?;
+ctx.apply(&deployment).await?;
+ctx.wait_ready("deployment/myapp").await?;
+
+// Or with test macro
 #[seppo::test]
-async fn test_my_app(ctx: TestContext) {
-    // Deploy
-    ctx.apply(&my_deployment).await?;
+async fn test_my_app(ctx: Context) {
+    ctx.apply(&deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    // Test
     let pf = ctx.forward_to("svc/myapp", 8080).await?;
-    let resp = pf.get("/health").await?;
-    assert!(resp.contains("ok"));
+    assert!(pf.get("/health").await?.contains("ok"));
 }
 ```
-
-Run `cargo test`. Done.
 
 ---
 
 ## Why
 
-Kubernetes testing tooling today means YAML fixtures, bash scripts, and complex test frameworks that don't integrate with your language. You end up with a parallel testing infrastructure that's harder to maintain than the code it tests.
+Kubernetes tooling today means YAML, bash scripts, and complex frameworks that don't integrate with your language. You end up with a parallel infrastructure that's harder to maintain than the code it operates.
 
-Seppo is a native Rust library. Your tests are Rust code. They run with `cargo test`. No external tools, no configuration languages, no impedance mismatch.
+Seppo is a native Rust library. Your K8s operations are Rust code. No external tools, no configuration languages, no impedance mismatch.
 
 - **No YAML** — define resources in Rust
 - **No CLI** — library, not a tool
-- **No framework** — works with `cargo test`
 - **Native kube-rs** — not kubectl shelling
+- **Works standalone or with tests**
 
 ---
 
@@ -37,8 +40,8 @@ Seppo is a native Rust library. Your tests are Rust code. They run with `cargo t
 
 ```
 ┌──────────────────┐     ┌─────────────────┐     ┌──────────────┐
-│  #[seppo::test]  │────▶│   TestContext   │────▶│  Kubernetes  │
-│   your test fn   │     │   (namespace)   │     │   (Kind/EKS) │
+│  Context::new()  │────▶│     Context     │────▶│  Kubernetes  │
+│  or #[seppo::test]│     │   (namespace)   │     │   (Kind/EKS) │
 └──────────────────┘     └─────────────────┘     └──────────────┘
          │                       │
          │                       ├── apply()      → create resources
@@ -47,18 +50,18 @@ Seppo is a native Rust library. Your tests are Rust code. They run with `cargo t
          │                       ├── exec()       → run commands
          │                       └── up()         → deploy stacks
          │
-         └── on success: cleanup namespace
-             on failure: keep namespace + dump diagnostics
+         └── cleanup() when done
+             (test macro: auto-cleanup on success, keep on failure)
 ```
 
-Each test gets an isolated namespace. Resources are created with `kube-rs`. On failure, Seppo dumps pod logs and events, then keeps the namespace for debugging.
+Each `Context` gets an isolated namespace. Resources are created with `kube-rs`. The `#[seppo::test]` macro handles cleanup automatically.
 
 ---
 
 ## Install
 
 ```toml
-[dev-dependencies]
+[dependencies]
 seppo = "0.1"
 ```
 
@@ -68,14 +71,33 @@ Requires: Docker + [Kind](https://kind.sigs.k8s.io/) (or existing cluster)
 
 ## Usage
 
-### Basic Test
+### Standalone
 
 ```rust
-use seppo::TestContext;
+use seppo::Context;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Context::new().await?;
+
+    ctx.apply(&my_deployment).await?;
+    ctx.wait_ready("deployment/myapp").await?;
+
+    // Do stuff...
+
+    ctx.cleanup().await?;
+    Ok(())
+}
+```
+
+### With Test Macro
+
+```rust
+use seppo::Context;
 use k8s_openapi::api::core::v1::ConfigMap;
 
 #[seppo::test]
-async fn test_configmap(ctx: TestContext) {
+async fn test_configmap(ctx: Context) {
     let cm = ConfigMap {
         metadata: kube::api::ObjectMeta {
             name: Some("myconfig".into()),
@@ -96,7 +118,7 @@ async fn test_configmap(ctx: TestContext) {
 
 ```rust
 #[seppo::test]
-async fn test_deployment(ctx: TestContext) {
+async fn test_deployment(ctx: Context) {
     ctx.apply(&deployment).await?;
 
     // Wait until ready (understands K8s semantics)
@@ -110,7 +132,7 @@ async fn test_deployment(ctx: TestContext) {
 
 ```rust
 #[seppo::test]
-async fn test_api(ctx: TestContext) {
+async fn test_api(ctx: Context) {
     ctx.apply(&deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
@@ -122,13 +144,28 @@ async fn test_api(ctx: TestContext) {
 }
 ```
 
+### Resource Builders (No YAML)
+
+```rust
+use seppo::DeploymentFixture;
+
+let deployment = DeploymentFixture::new("myapp")
+    .image("nginx:latest")
+    .replicas(3)
+    .port(80)
+    .env("LOG_LEVEL", "debug")
+    .build();
+
+ctx.apply(&deployment).await?;
+```
+
 ### Deploy Stacks
 
 ```rust
 use seppo::Stack;
 
 #[seppo::test]
-async fn test_full_stack(ctx: TestContext) {
+async fn test_full_stack(ctx: Context) {
     let stack = Stack::new()
         .service("frontend")
             .image("fe:test")
@@ -153,7 +190,7 @@ async fn test_full_stack(ctx: TestContext) {
 
 ```rust
 #[seppo::test]
-async fn test_exec(ctx: TestContext) {
+async fn test_exec(ctx: Context) {
     ctx.apply(&pod).await?;
     ctx.wait_ready("pod/myapp").await?;
 
@@ -197,6 +234,7 @@ Set `SEPPO_KEEP_ALL=true` to keep namespaces even on success.
 
 | Feature | Status |
 |---------|--------|
+| `Context` (standalone) | Done |
 | `#[seppo::test]` macro | Done |
 | Isolated namespaces | Done |
 | apply/get/delete/list | Done |
@@ -204,6 +242,8 @@ Set `SEPPO_KEEP_ALL=true` to keep namespaces even on success.
 | forward_to() (svc/deploy/pod) | Done |
 | exec() | Done |
 | Stack builder | Done |
+| DeploymentFixture/PodFixture/ServiceFixture | Done |
+| eventually/consistently helpers | Done |
 | Failure diagnostics | Done |
 | OpenTelemetry integration | Done |
 | Kind provider | Done |
@@ -212,30 +252,9 @@ Set `SEPPO_KEEP_ALL=true` to keep namespaces even on success.
 
 ---
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  cargo test                                                     │
-│    └── #[tokio::test]  → async runtime                          │
-│    └── #[sqlx::test]   → database connection                    │
-│    └── #[seppo::test]  → kubernetes cluster                     │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│  Your Machine / CI                      Kubernetes Cluster      │
-│  ┌──────────────────┐                  ┌──────────────────┐    │
-│  │ cargo test       │ ───kube-rs────▶  │ Kind / EKS / GKE │    │
-│  │ (seppo)          │                  │                  │    │
-│  └──────────────────┘                  └──────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
 ## Name
 
-*Seppo* — Finnish name. The everyman. Like your tests: reliable, unpretentious, gets the job done.
+*Seppo* — Finnish name. The everyman. Like your code: reliable, unpretentious, gets the job done.
 
 ---
 

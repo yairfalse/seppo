@@ -1,4 +1,4 @@
-# Seppo: Kubernetes Testing SDK
+# Seppo: Kubernetes SDK
 
 **Native library. No config files. Just code.**
 
@@ -6,21 +6,37 @@
 
 ## WHAT IS SEPPO
 
-Seppo connects your tests to Kubernetes. That's it.
+Seppo connects your code to Kubernetes. That's it.
 
 ```rust
-#[seppo::test]
-async fn test_my_app(ctx: TestContext) {
-    ctx.apply(my_deployment).await?;
+// Standalone usage
+use seppo::Context;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Context::new().await?;
+
+    ctx.apply(&my_deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    let resp = ctx.forward("svc/myapp", 8080).get("/health").await?;
-    assert_eq!(resp.status(), 200);
+    let pf = ctx.forward_to("svc/myapp", 8080).await?;
+    let resp = pf.get("/health").await?;
+
+    ctx.cleanup().await?;
+    Ok(())
 }
 ```
 
-```bash
-cargo test
+```rust
+// With test macro
+#[seppo::test]
+async fn test_my_app(ctx: Context) {
+    ctx.apply(&my_deployment).await?;
+    ctx.wait_ready("deployment/myapp").await?;
+
+    let resp = ctx.forward_to("svc/myapp", 8080).await?.get("/health").await?;
+    assert!(resp.contains("ok"));
+}
 ```
 
 Like `#[tokio::test]` gives you async, `#[seppo::test]` gives you Kubernetes.
@@ -31,7 +47,7 @@ Like `#[tokio::test]` gives you async, `#[seppo::test]` gives you Kubernetes.
 
 1. **Native library** - Not a CLI, not a framework. A library.
 2. **No config files** - No YAML, no TOML. Just Rust code.
-3. **Works with cargo test** - Not a test runner. Enhances existing tests.
+3. **Works standalone or with tests** - Use however you want.
 4. **kube-rs powered** - Native K8s client, not kubectl shelling.
 5. **Failure-friendly** - Keep resources on failure, dump logs, debug easily.
 
@@ -41,16 +57,15 @@ Like `#[tokio::test]` gives you async, `#[seppo::test]` gives you Kubernetes.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  cargo test                                                 │
-│    └── #[tokio::test]  → async runtime                      │
-│    └── #[sqlx::test]   → database connection                │
-│    └── #[seppo::test]  → kubernetes cluster                 │
+│  Your Code                                                  │
+│    └── Context::new()  → standalone usage                   │
+│    └── #[seppo::test]  → test macro (optional)              │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
 │  Your Machine / CI                    Kubernetes Cluster    │
 │  ┌─────────────────┐                 ┌─────────────────┐   │
-│  │ cargo test      │ ───kube-rs───► │ Kind / EKS / etc│   │
+│  │ your app        │ ───kube-rs───► │ Kind / EKS / etc│   │
 │  │ (seppo)         │                 │                 │   │
 │  └─────────────────┘                 └─────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
@@ -60,27 +75,19 @@ Like `#[tokio::test]` gives you async, `#[seppo::test]` gives you Kubernetes.
 
 ## CORE COMPONENTS
 
-### 1. `#[seppo::test]` - Test Macro
+### 1. `Context` - K8s Connection
 
 ```rust
-#[seppo::test]
-async fn test_my_controller(ctx: TestContext) {
-    // ctx is auto-injected with:
-    // - kube::Client
-    // - isolated namespace
-    // - cleanup on success / diagnostics on failure
-}
-```
-
-### 2. `TestContext` - K8s Connection
-
-```rust
-pub struct TestContext {
+pub struct Context {
     pub client: kube::Client,
     pub namespace: String,
 }
 
-impl TestContext {
+impl Context {
+    // Creation
+    pub async fn new() -> Result<Self>;  // Creates isolated namespace
+    pub async fn cleanup(&self) -> Result<()>;
+
     // Resource operations
     pub async fn apply<K: Resource>(&self, resource: &K) -> Result<K>;
     pub async fn get<K: Resource>(&self, name: &str) -> Result<K>;
@@ -89,15 +96,31 @@ impl TestContext {
 
     // Waiting
     pub async fn wait_ready(&self, resource: &str) -> Result<()>;
-    pub async fn wait_for<K: Resource>(&self, name: &str) -> WaitBuilder<K>;
+    pub async fn wait_for<K: Resource>(&self, name: &str, condition: F) -> Result<K>;
 
     // Diagnostics
     pub async fn logs(&self, pod: &str) -> Result<String>;
     pub async fn events(&self) -> Result<Vec<Event>>;
 
     // Network
-    pub async fn forward(&self, svc: &str, port: u16) -> PortForward;
+    pub async fn forward(&self, pod: &str, port: u16) -> Result<PortForward, PortForwardError>;
+    pub async fn forward_to(&self, target: &str, port: u16) -> Result<PortForward, PortForwardError>;
     pub async fn exec(&self, pod: &str, cmd: &[&str]) -> Result<String>;
+
+    // Stack deployment
+    pub async fn up(&self, stack: &Stack) -> Result<()>;
+}
+```
+
+### 2. `#[seppo::test]` - Test Macro (Optional)
+
+```rust
+#[seppo::test]
+async fn test_my_controller(ctx: Context) {
+    // ctx is auto-injected with:
+    // - kube::Client
+    // - isolated namespace
+    // - cleanup on success / diagnostics on failure
 }
 ```
 
@@ -105,7 +128,6 @@ impl TestContext {
 
 ```rust
 let stack = Stack::new()
-    .image("myapp:test")
     .service("frontend")
         .image("fe:test")
         .replicas(4)
@@ -114,18 +136,25 @@ let stack = Stack::new()
         .image("be:test")
         .replicas(2)
         .port(8080)
-    .service("database")
-        .image("postgres:15")
-        .port(5432);
+    .build();
 
-#[seppo::test]
-async fn test_full_stack(ctx: TestContext) {
-    ctx.up(stack).await?;
-    // All services running
-}
+ctx.up(&stack).await?;
 ```
 
-### 4. Failure Handling
+### 4. Fixtures - Resource Builders
+
+```rust
+let deployment = DeploymentFixture::new("myapp")
+    .image("nginx:latest")
+    .replicas(3)
+    .port(80)
+    .env("LOG_LEVEL", "debug")
+    .build();
+
+ctx.apply(&deployment).await?;
+```
+
+### 5. Failure Handling (with test macro)
 
 On test **success**:
 - Cleanup namespace
@@ -161,87 +190,19 @@ Configurable:
 SEPPO_KEEP_ALL=true          # never cleanup, even on success (debug mode)
 ```
 
-Note: Namespace is always kept on failure for debugging.
-
 ---
 
-## CURRENT STATE (Phase 1 - Done)
+## CURRENT STATE
 
-**Infrastructure layer:**
-- `ClusterConfig` - Cluster configuration with builders
-- `EnvironmentConfig` - Environment configuration with builders
-- `ClusterProvider` trait - Kind, Minikube, Existing
-- `setup()` - Environment setup (images, manifests, wait)
-- `run()` - Command execution
+**Core SDK:**
+- `Context` - K8s connection with namespace management
+- `#[seppo::test]` - Optional test macro
+- `Stack` - Multi-service deployment builder
+- `DeploymentFixture`, `PodFixture`, `ServiceFixture` - Resource builders
+- `eventually`, `consistently` - Async condition helpers
+- Port forwarding and exec
+- Diagnostics collection
 - OpenTelemetry integration
-
-**What's missing (Phase 2):**
-- `#[seppo::test]` macro
-- `TestContext` with kube-rs
-- Failure diagnostics
-- Port forwarding
-- Stack builder
-
----
-
-## PHASE 2 PLAN (Current Work)
-
-### Milestone 1: TestContext
-
-```rust
-pub struct TestContext {
-    client: kube::Client,
-    namespace: String,
-}
-
-impl TestContext {
-    pub async fn new() -> Result<Self>;
-    pub async fn apply<K>(&self, resource: &K) -> Result<K>;
-    pub async fn get<K>(&self, name: &str) -> Result<K>;
-    pub async fn logs(&self, pod: &str) -> Result<String>;
-    pub async fn cleanup(&self) -> Result<()>;
-}
-```
-
-### Milestone 2: Test Macro (seppo-macros crate)
-
-```rust
-#[proc_macro_attribute]
-pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // 1. Create namespace
-    // 2. Create TestContext
-    // 3. Inject into test function
-    // 4. Handle cleanup/failure
-}
-```
-
-### Milestone 3: Failure Diagnostics
-
-On panic/error:
-1. Collect pod logs
-2. Collect events
-3. Describe resources
-4. Print to test output
-5. Keep namespace (configurable)
-
-### Milestone 4: Port Forwarding & Exec
-
-```rust
-let fwd = ctx.forward("svc/myapp", 8080).await?;
-let resp = fwd.get("/health").await?;
-
-let output = ctx.exec("pod/myapp", &["cat", "/etc/config"]).await?;
-```
-
-### Milestone 5: Stack Builder
-
-```rust
-let stack = Stack::new()
-    .service("frontend").image("fe:test").replicas(4)
-    .service("backend").image("be:test").replicas(2);
-
-ctx.up(stack).await?;
-```
 
 ---
 
@@ -250,26 +211,9 @@ ctx.up(stack).await?;
 | Language | Crate/Module | K8s Client |
 |----------|--------------|------------|
 | Rust | `seppo` | kube-rs |
-| Go | `seppo-go` | client-go |
+| Go | `ilmari` | client-go |
 
 Same concepts, native implementation.
-
----
-
-## FIRST USER: RAUTA
-
-Rauta is a Kubernetes Gateway API controller in Rust.
-
-Rauta's current test framework:
-```
-rauta/tests/integration/framework/
-├── mod.rs        → TestContext
-├── cluster.rs    → Kind management
-├── fixtures.rs   → YAML templates
-├── assertions.rs → Gateway assertions
-```
-
-**Seppo = Rauta's test framework, generalized.**
 
 ---
 
@@ -286,7 +230,7 @@ cargo test test_context_creates_namespace  # PASSES
 cargo test  # ALL PASS
 
 # COMMIT
-git commit -m "feat: TestContext creates isolated namespace"
+git commit -m "feat: Context creates isolated namespace"
 ```
 
 **Small commits. Always green.**
@@ -300,26 +244,31 @@ seppo/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
-│   ├── config.rs           # Builders
-│   ├── context.rs          # TestContext (NEW)
+│   ├── context.rs          # Context - main entry point
+│   ├── config.rs           # Cluster/Environment config
+│   ├── stack.rs            # Stack builder
+│   ├── fixtures.rs         # Resource builders
+│   ├── assertions.rs       # Semantic assertions
+│   ├── eventually.rs       # Async condition helpers
+│   ├── diagnostics.rs      # Failure diagnostics
+│   ├── portforward.rs      # Port forwarding
+│   ├── wait.rs             # Rich wait errors
 │   ├── provider/           # Cluster providers
-│   ├── stack.rs            # Stack builder (NEW)
-│   ├── diagnostics.rs      # Failure diagnostics (NEW)
 │   ├── telemetry.rs
 │   └── metrics.rs
-├── seppo-macros/           # Proc macro crate (NEW)
+├── seppo-macros/           # Proc macro crate
 │   ├── Cargo.toml
 │   └── src/lib.rs
 └── tests/
-    └── context_test.rs
+    └── macro_test.rs
 ```
 
 ---
 
 ## WHAT SEPPO IS NOT
 
-- **Not a CLI** - No `seppo test` command
-- **Not a test runner** - Works with `cargo test`
+- **Not a CLI** - No `seppo` command
+- **Not a test runner** - Works with `cargo test` or standalone
 - **Not config-driven** - No YAML/TOML files
 - **Not kubectl wrapper** - Uses kube-rs directly
 
@@ -328,14 +277,17 @@ seppo/
 ## SUCCESS CRITERIA
 
 ```rust
-#[seppo::test]
-async fn test_my_app(ctx: TestContext) {
-    ctx.apply(my_deployment).await?;
-    ctx.wait_ready("deployment/myapp").await?;
+// Standalone
+let ctx = Context::new().await?;
+ctx.apply(&my_deployment).await?;
+ctx.wait_ready("deployment/myapp").await?;
+ctx.cleanup().await?;
 
-    let resp = ctx.forward("svc/myapp", 8080)
-        .get("/health").await?;
-    assert_eq!(resp.status(), 200);
+// Or with test macro
+#[seppo::test]
+async fn test_my_app(ctx: Context) {
+    ctx.apply(&my_deployment).await?;
+    ctx.wait_ready("deployment/myapp").await?;
 }
 ```
 
@@ -345,4 +297,4 @@ cargo test  # Just works
 
 ---
 
-**Connect to K8s. Run your tests. That's Seppo.**
+**Connect to K8s. Just code. That's Seppo.**
