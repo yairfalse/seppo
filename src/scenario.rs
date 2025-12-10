@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use seppo::scenario::{Scenario, ScenarioBuilder};
+//! use seppo::scenario::Scenario;
 //!
 //! #[tokio::test]
 //! async fn test_user_api() {
