@@ -197,8 +197,7 @@ impl ResourceState for k8s_openapi::api::apps::v1::StatefulSet {
         let current = self
             .status
             .as_ref()
-            .map(|s| s.current_replicas)
-            .unwrap_or(Some(0))
+            .and_then(|s| s.current_replicas)
             .unwrap_or(0);
 
         format!(
