@@ -35,7 +35,7 @@ async fn test_my_app(ctx: Context) {
     ctx.wait_ready("deployment/myapp").await?;
 
     let resp = ctx.forward_to("svc/myapp", 8080).await?.get("/health").await?;
-    assert_eq!(resp.status(), 200);
+    assert!(resp.contains("ok"));
 }
 ```
 
