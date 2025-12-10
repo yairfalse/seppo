@@ -146,17 +146,34 @@ impl<T: Send + 'static> Scenario<T> {
             if let Some(desc) = &self.then_desc {
                 println!("   Then {}", desc);
             }
-            if let Some(result) = result {
-                assertion(result);
+            match result {
+                Some(result) => {
+                    // Catch panics from assertions and convert to ScenarioError
+                    let assertion_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            assertion(result);
+                        }));
+                    if let Err(panic) = assertion_result {
+                        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "assertion panicked".to_string()
+                        };
+                        return Err(ScenarioError::AssertionFailed(msg));
+                    }
+                }
+                None => {
+                    // If a 'then' assertion was defined but no 'when' result was available
+                    return Err(ScenarioError::AssertionFailed(
+                        "Then assertion defined but no result from When step to assert on"
+                            .to_string(),
+                    ));
+                }
             }
         }
 
-        // If a 'then' assertion was defined but no 'when' result was available, report error
-        if self.then.is_some() && result.is_none() {
-            return Err(ScenarioError::AssertionFailed(
-                "Then assertion defined but no result from When step to assert on".to_string(),
-            ));
-        }
         println!("   ✅ Scenario passed\n");
         Ok(())
     }
@@ -304,5 +321,26 @@ mod tests {
             ScenarioError::AssertionFailed("test".to_string()).to_string(),
             "assertion failed: test"
         );
+        assert_eq!(
+            ScenarioError::TeardownFailed("test".to_string()).to_string(),
+            "teardown failed: test"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scenario_assertion_panic_caught() {
+        let result = Scenario::new("panicking assertion")
+            .given("nothing special", || async { Ok(()) })
+            .when("we do something", || async { Ok(42) })
+            .then("assertion panics", |_result| {
+                panic!("intentional panic in assertion");
+            })
+            .run()
+            .await;
+
+        assert!(matches!(result, Err(ScenarioError::AssertionFailed(_))));
+        if let Err(ScenarioError::AssertionFailed(msg)) = result {
+            assert!(msg.contains("intentional panic"));
+        }
     }
 }
