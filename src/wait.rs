@@ -6,7 +6,7 @@
 //!
 //! ```ignore
 //! match ctx.wait_ready("deployment/myapp").await {
-//!     Err(ContextError::WaitFailed(err)) => {
+//!     Err(ContextError::WaitTimeout(err)) => {
 //!         println!("Resource: {}", err.resource);
 //!         println!("Last state: {}", err.last_state);
 //!         println!("Elapsed: {:?}", err.elapsed);
