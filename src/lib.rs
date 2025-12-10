@@ -1,6 +1,6 @@
-//! Seppo - Kubernetes Testing SDK
+//! Seppo - Kubernetes SDK
 //!
-//! A native Rust library for Kubernetes integration testing.
+//! A native Rust library for Kubernetes operations.
 //! No config files, just code.
 //!
 //! # Example
@@ -70,9 +70,9 @@ pub mod metrics;
 pub mod portforward;
 pub mod provider;
 pub mod runner;
-pub mod scenario;
 pub mod stack;
 pub mod telemetry;
+pub mod traffic;
 pub mod wait;
 
 // Re-export commonly used types
@@ -80,9 +80,12 @@ pub use assertions::{AssertionError, DeploymentAssertion, PodAssertion, ServiceA
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
 pub use context::{
-    parse_forward_target, parse_resource_ref, ContextError, ForwardTarget, ResourceKind,
-    TestContext,
+    parse_forward_target, parse_resource_ref, Context, ContextError, ForwardTarget, ResourceKind,
 };
+
+// Backward compatibility alias
+#[allow(deprecated)]
+pub use context::TestContext;
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
 pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};
@@ -93,9 +96,9 @@ pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
 };
 pub use runner::{run, run_with_env, RunResult, RunnerError};
-pub use scenario::{Scenario, ScenarioError, Steps};
 pub use stack::{ServiceBuilder, Stack, StackError};
 pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
+pub use traffic::{HttpAssert, RequestRecord, TrafficError, TrafficRecorder};
 pub use wait::{ResourceState, WaitError, WaitEvent};
 
 // Re-export proc macros
