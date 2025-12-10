@@ -103,13 +103,25 @@ impl DeploymentFixture {
     }
 
     /// Set the replica count
+    ///
+    /// # Panics
+    /// Panics if replicas is negative
     pub fn replicas(mut self, replicas: i32) -> Self {
+        assert!(replicas >= 0, "replica count cannot be negative");
         self.replicas = replicas;
         self
     }
 
     /// Add a container port
+    ///
+    /// # Panics
+    /// Panics if port is not in the valid range (1-65535)
     pub fn port(mut self, port: i32) -> Self {
+        assert!(
+            port >= 1 && port <= 65535,
+            "port must be in range 1-65535, got {}",
+            port
+        );
         self.ports.push(port);
         self
     }
@@ -139,7 +151,12 @@ impl DeploymentFixture {
     }
 
     /// Build the Deployment resource
+    ///
+    /// # Panics
+    /// Panics if image is empty
     pub fn build(&self) -> Deployment {
+        assert!(!self.image.is_empty(), "image must be set before building");
+
         let container_ports: Vec<ContainerPort> = self
             .ports
             .iter()
@@ -269,7 +286,12 @@ impl PodFixture {
     }
 
     /// Build the Pod resource
+    ///
+    /// # Panics
+    /// Panics if image is empty
     pub fn build(&self) -> Pod {
+        assert!(!self.image.is_empty(), "image must be set before building");
+
         let env_vars: Vec<EnvVar> = self
             .env
             .iter()
@@ -343,7 +365,20 @@ impl ServiceFixture {
     }
 
     /// Add a port mapping (port -> targetPort)
+    ///
+    /// # Panics
+    /// Panics if port or target_port is not in the valid range (1-65535)
     pub fn port(mut self, port: i32, target_port: i32) -> Self {
+        assert!(
+            port >= 1 && port <= 65535,
+            "port must be in range 1-65535, got {}",
+            port
+        );
+        assert!(
+            target_port >= 1 && target_port <= 65535,
+            "target_port must be in range 1-65535, got {}",
+            target_port
+        );
         self.ports.push((port, target_port));
         self
     }
@@ -561,5 +596,158 @@ mod tests {
             Some(vec!["sh".to_string(), "-c".to_string()])
         );
         assert_eq!(container.args, Some(vec!["echo hello".to_string()]));
+    }
+
+    #[test]
+    fn test_deployment_fixture_with_namespace() {
+        let deployment = DeploymentFixture::new("my-app")
+            .image("nginx:latest")
+            .namespace("my-namespace")
+            .build();
+
+        assert_eq!(
+            deployment.metadata.namespace,
+            Some("my-namespace".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pod_fixture_with_namespace() {
+        let pod = PodFixture::new("test-pod")
+            .image("busybox")
+            .namespace("my-namespace")
+            .build();
+
+        assert_eq!(pod.metadata.namespace, Some("my-namespace".to_string()));
+    }
+
+    #[test]
+    fn test_pod_fixture_with_args() {
+        let pod = PodFixture::new("test-pod")
+            .image("busybox")
+            .command(&["sh", "-c"])
+            .args(&["echo hello && sleep infinity"])
+            .build();
+
+        let container = &pod.spec.as_ref().unwrap().containers[0];
+        assert_eq!(
+            container.args,
+            Some(vec!["echo hello && sleep infinity".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_pod_fixture_with_label() {
+        let pod = PodFixture::new("test-pod")
+            .image("busybox")
+            .label("tier", "backend")
+            .label("env", "test")
+            .build();
+
+        let labels = pod.metadata.labels.as_ref().unwrap();
+        assert_eq!(labels.get("app"), Some(&"test-pod".to_string()));
+        assert_eq!(labels.get("tier"), Some(&"backend".to_string()));
+        assert_eq!(labels.get("env"), Some(&"test".to_string()));
+    }
+
+    #[test]
+    fn test_service_fixture_with_namespace() {
+        let service = ServiceFixture::new("my-service")
+            .namespace("my-namespace")
+            .selector("app", "my-app")
+            .port(80, 8080)
+            .build();
+
+        assert_eq!(
+            service.metadata.namespace,
+            Some("my-namespace".to_string())
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "replica count cannot be negative")]
+    fn test_deployment_negative_replicas_panics() {
+        DeploymentFixture::new("my-app")
+            .image("nginx:latest")
+            .replicas(-1);
+    }
+
+    #[test]
+    #[should_panic(expected = "port must be in range 1-65535")]
+    fn test_deployment_invalid_port_zero_panics() {
+        DeploymentFixture::new("my-app")
+            .image("nginx:latest")
+            .port(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "port must be in range 1-65535")]
+    fn test_deployment_invalid_port_too_high_panics() {
+        DeploymentFixture::new("my-app")
+            .image("nginx:latest")
+            .port(65536);
+    }
+
+    #[test]
+    #[should_panic(expected = "port must be in range 1-65535")]
+    fn test_service_invalid_port_panics() {
+        ServiceFixture::new("my-service")
+            .port(0, 8080);
+    }
+
+    #[test]
+    #[should_panic(expected = "target_port must be in range 1-65535")]
+    fn test_service_invalid_target_port_panics() {
+        ServiceFixture::new("my-service")
+            .port(80, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "image must be set before building")]
+    fn test_deployment_empty_image_panics() {
+        DeploymentFixture::new("my-app").build();
+    }
+
+    #[test]
+    #[should_panic(expected = "image must be set before building")]
+    fn test_pod_empty_image_panics() {
+        PodFixture::new("test-pod").build();
+    }
+
+    #[test]
+    fn test_deployment_valid_port_range() {
+        // Test boundary values
+        let deployment = DeploymentFixture::new("my-app")
+            .image("nginx:latest")
+            .port(1)
+            .port(65535)
+            .build();
+
+        let container = &deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+
+        let ports = container.ports.as_ref().unwrap();
+        assert_eq!(ports[0].container_port, 1);
+        assert_eq!(ports[1].container_port, 65535);
+    }
+
+    #[test]
+    fn test_service_valid_port_range() {
+        // Test boundary values
+        let service = ServiceFixture::new("my-service")
+            .port(1, 1)
+            .port(65535, 65535)
+            .build();
+
+        let ports = service.spec.as_ref().unwrap().ports.as_ref().unwrap();
+        assert_eq!(ports[0].port, 1);
+        assert_eq!(ports[1].port, 65535);
     }
 }
