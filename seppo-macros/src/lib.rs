@@ -1,4 +1,4 @@
-//! Proc macros for seppo Kubernetes testing framework
+//! Proc macros for seppo Kubernetes SDK
 //!
 //! Provides `#[seppo::test]` attribute macro for K8s integration tests.
 
@@ -8,18 +8,18 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType, ReturnType};
 
 /// Attribute macro for Kubernetes integration tests.
 ///
-/// Automatically creates a `TestContext` with an isolated namespace and
+/// Automatically creates a `Context` with an isolated namespace and
 /// injects it into your test function. Handles cleanup on success and
 /// keeps namespace on failure for debugging.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use seppo::TestContext;
+/// use seppo::Context;
 /// use k8s_openapi::api::core::v1::ConfigMap;
 ///
 /// #[seppo::test]
-/// async fn test_my_app(ctx: TestContext) {
+/// async fn test_my_app(ctx: Context) {
 ///     let cm = ConfigMap { /* ... */ };
 ///     ctx.apply(&cm).await.unwrap();
 ///
@@ -31,7 +31,7 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType, ReturnType};
 ///
 /// ```ignore
 /// #[seppo::test]
-/// async fn test_with_result(ctx: TestContext) -> Result<(), Box<dyn std::error::Error>> {
+/// async fn test_with_result(ctx: Context) -> Result<(), Box<dyn std::error::Error>> {
 ///     ctx.apply(&deployment).await?;
 ///     Ok(())
 /// }
@@ -40,7 +40,7 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType, ReturnType};
 /// # What it does
 ///
 /// The macro transforms your test function to:
-/// 1. Create a new `TestContext` with isolated namespace
+/// 1. Create a new `Context` with isolated namespace
 /// 2. Run your test with the context
 /// 3. On success: cleanup the namespace
 /// 4. On failure: keep namespace for debugging
@@ -59,7 +59,7 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_vis = &input_fn.vis;
     let fn_attrs = &input_fn.attrs;
 
-    // Check if function takes a TestContext parameter named "ctx"
+    // Check if function takes a Context parameter named "ctx"
     let has_ctx_param = input_fn.sig.inputs.iter().any(|arg| {
         if let FnArg::Typed(PatType { pat, .. }) = arg {
             if let Pat::Ident(ident) = pat.as_ref() {
@@ -108,8 +108,8 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 use std::panic::{catch_unwind, AssertUnwindSafe};
                 use futures::FutureExt;
 
-                let ctx = seppo::TestContext::new().await
-                    .unwrap_or_else(|e| panic!("Failed to create TestContext: {}", e));
+                let ctx = seppo::Context::new().await
+                    .unwrap_or_else(|e| panic!("Failed to create Context: {}", e));
                 let namespace = ctx.namespace.clone();
 
                 // Run test and catch any panics

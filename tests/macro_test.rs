@@ -2,17 +2,17 @@
 
 use k8s_openapi::api::core::v1::ConfigMap;
 #[allow(unused_imports)] // Used in macro-expanded function signatures
-use seppo::TestContext;
+use seppo::Context;
 
 /// Test using the #[seppo::test] macro
 /// The macro automatically:
 /// - Creates an isolated namespace
-/// - Injects TestContext as `ctx`
+/// - Injects Context as `ctx`
 /// - Cleans up on success
 /// - Keeps namespace on failure for debugging
 #[seppo::test]
 #[ignore] // Requires real cluster
-async fn test_macro_creates_configmap(ctx: TestContext) {
+async fn test_macro_creates_configmap(ctx: Context) {
     // Create a ConfigMap
     let cm = ConfigMap {
         metadata: kube::api::ObjectMeta {
@@ -41,7 +41,7 @@ async fn test_macro_creates_configmap(ctx: TestContext) {
 /// Test that the macro handles panics and keeps namespace
 #[seppo::test]
 #[ignore] // Requires real cluster
-async fn test_macro_keeps_namespace_on_failure(ctx: TestContext) {
+async fn test_macro_keeps_namespace_on_failure(ctx: Context) {
     // Create something first
     let cm = ConfigMap {
         metadata: kube::api::ObjectMeta {

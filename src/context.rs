@@ -1,7 +1,7 @@
-//! Test context for Kubernetes integration testing
+//! Kubernetes SDK context
 //!
-//! Provides a connection to a Kubernetes cluster with an isolated namespace
-//! for each test.
+//! Provides a connection to a Kubernetes cluster with namespace management.
+//! Can be used standalone or with the `#[seppo::test]` macro.
 
 use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
@@ -118,15 +118,50 @@ pub fn parse_forward_target(target: &str) -> Result<ForwardTarget, ContextError>
     }
 }
 
-/// Test context providing K8s connection and isolated namespace
-pub struct TestContext {
+/// Kubernetes SDK context providing cluster connection and namespace management
+///
+/// `Context` is the main entry point for interacting with Kubernetes.
+/// It can be created standalone or injected by the `#[seppo::test]` macro.
+///
+/// # Standalone Usage
+///
+/// ```ignore
+/// use seppo::Context;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let ctx = Context::new().await?;
+///
+///     // Use ctx to interact with K8s...
+///     ctx.apply(&my_deployment).await?;
+///     ctx.wait_ready("deployment/myapp").await?;
+///
+///     ctx.cleanup().await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// # With Test Macro
+///
+/// ```ignore
+/// #[seppo::test]
+/// async fn my_test(ctx: Context) {
+///     ctx.apply(&my_deployment).await?;
+///     ctx.wait_ready("deployment/myapp").await?;
+/// }
+/// ```
+pub struct Context {
     /// Kubernetes client
     pub client: Client,
-    /// Isolated namespace for this test
+    /// Namespace for operations
     pub namespace: String,
 }
 
-/// Errors from TestContext operations
+/// Alias for backward compatibility
+#[deprecated(since = "0.2.0", note = "Use `Context` instead")]
+pub type TestContext = Context;
+
+/// Errors from Context operations
 #[derive(Debug, thiserror::Error)]
 pub enum ContextError {
     #[error("Failed to create Kubernetes client: {0}")]
@@ -166,8 +201,11 @@ pub enum ContextError {
     InvalidResourceRef(String),
 }
 
-impl TestContext {
-    /// Create a new test context with an isolated namespace
+impl Context {
+    /// Create a new context with an isolated namespace
+    ///
+    /// Creates a unique namespace in the cluster for this context.
+    /// The namespace will be labeled with `seppo.io/test=true`.
     pub async fn new() -> Result<Self, ContextError> {
         // 1. Create kube::Client
         let client = Client::try_default()
@@ -1035,12 +1073,12 @@ impl TestContext {
 mod tests {
     use super::*;
 
-    /// RED: Test that TestContext::new() creates a namespace
+    /// RED: Test that Context::new() creates a namespace
     #[tokio::test]
     #[ignore] // Requires real cluster
     async fn test_context_creates_namespace() {
         // Create context
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Namespace should start with "seppo-test-"
         assert!(
@@ -1070,7 +1108,7 @@ mod tests {
     #[ignore] // Requires real cluster
     async fn test_context_cleanup_deletes_namespace() {
         // Create context
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
         let namespace = ctx.namespace.clone();
 
         // Cleanup
@@ -1103,7 +1141,7 @@ mod tests {
     async fn test_context_apply_creates_resource() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a ConfigMap
         let cm = ConfigMap {
@@ -1144,7 +1182,7 @@ mod tests {
     async fn test_context_get_retrieves_resource() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a ConfigMap first
         let cm = ConfigMap {
@@ -1179,7 +1217,7 @@ mod tests {
     async fn test_context_delete_removes_resource() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a ConfigMap
         let cm = ConfigMap {
@@ -1211,7 +1249,7 @@ mod tests {
     async fn test_context_list_returns_resources() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create multiple ConfigMaps
         for i in 0..3 {
@@ -1240,7 +1278,7 @@ mod tests {
     async fn test_context_logs_retrieves_pod_logs() {
         use k8s_openapi::api::core::v1::Pod;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a simple pod that outputs something
         let pod = Pod {
@@ -1289,7 +1327,7 @@ mod tests {
     async fn test_context_wait_for_condition() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a ConfigMap
         let cm = ConfigMap {
@@ -1333,7 +1371,7 @@ mod tests {
     async fn test_context_collect_pod_logs() {
         use k8s_openapi::api::core::v1::Pod;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a simple pod
         let pod = Pod {
@@ -1381,7 +1419,7 @@ mod tests {
     async fn test_context_events() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a ConfigMap to generate an event
         let cm = ConfigMap {
@@ -1410,7 +1448,7 @@ mod tests {
     async fn test_context_wait_for_timeout() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a ConfigMap without the expected data
         let cm = ConfigMap {
@@ -1449,7 +1487,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires real cluster
     async fn test_context_forward() {
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a simple nginx pod
         let pod = Pod {
@@ -1502,7 +1540,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires real cluster
     async fn test_context_exec() {
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a simple pod
         let pod = Pod {
@@ -1553,7 +1591,7 @@ mod tests {
     async fn test_context_up_deploys_stack() {
         use crate::stack::Stack;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a stack with one service
         let stack = Stack::new()
@@ -1592,7 +1630,7 @@ mod tests {
     async fn test_context_up_deploys_multiple_services() {
         use crate::stack::Stack;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a stack with multiple services
         let stack = Stack::new()
@@ -1652,7 +1690,7 @@ mod tests {
     async fn test_context_up_fails_on_empty_stack() {
         use crate::stack::Stack;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         let stack = Stack::new();
 
@@ -1672,7 +1710,7 @@ mod tests {
     async fn test_context_up_fails_without_image() {
         use crate::stack::Stack;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a service without an image
         let stack = Stack::new().service("no-image").replicas(1).build();
@@ -1821,7 +1859,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires real cluster
     async fn test_wait_ready_deployment() {
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a simple deployment
         let deployment = Deployment {
@@ -1882,7 +1920,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires real cluster
     async fn test_wait_ready_pod() {
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         let pod = Pod {
             metadata: kube::api::ObjectMeta {
@@ -1918,7 +1956,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires real cluster
     async fn test_forward_to_pod() {
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a pod with nginx
         let pod = Pod {
@@ -1970,7 +2008,7 @@ mod tests {
     async fn test_forward_to_service() {
         use crate::stack::Stack;
 
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a deployment with service using Stack
         let stack = Stack::new()
@@ -2012,7 +2050,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires real cluster
     async fn test_scale_deployment() {
-        let ctx = TestContext::new().await.expect("Should create context");
+        let ctx = Context::new().await.expect("Should create context");
 
         // Create a deployment with 1 replica
         let deployment = Deployment {
