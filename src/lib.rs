@@ -71,6 +71,7 @@ pub mod provider;
 pub mod runner;
 pub mod stack;
 pub mod telemetry;
+pub mod wait;
 
 // Re-export commonly used types
 pub use assertions::{AssertionError, DeploymentAssertion, PodAssertion, ServiceAssertion};
@@ -91,6 +92,7 @@ pub use provider::{
 pub use runner::{run, run_with_env, RunResult, RunnerError};
 pub use stack::{ServiceBuilder, Stack, StackError};
 pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
+pub use wait::{ResourceState, WaitError, WaitEvent};
 
 // Re-export proc macros
 pub use seppo_macros::test;
