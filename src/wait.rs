@@ -346,4 +346,80 @@ mod tests {
         assert!(state.contains("0/1 ready"));
         assert!(state.contains("ImagePullBackOff"));
     }
+
+    #[test]
+    fn test_statefulset_state_description() {
+        use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
+
+        let statefulset = StatefulSet {
+            spec: Some(StatefulSetSpec {
+                replicas: Some(3),
+                ..Default::default()
+            }),
+            status: Some(StatefulSetStatus {
+                ready_replicas: Some(2),
+                current_replicas: Some(3),
+                replicas: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let state = statefulset.state_description();
+        assert!(state.contains("2/3 ready"));
+        assert!(state.contains("3/3 current"));
+    }
+
+    #[test]
+    fn test_statefulset_state_description_no_status() {
+        use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
+
+        let statefulset = StatefulSet {
+            spec: Some(StatefulSetSpec {
+                replicas: Some(5),
+                ..Default::default()
+            }),
+            status: None,
+            ..Default::default()
+        };
+
+        let state = statefulset.state_description();
+        assert!(state.contains("0/5 ready"));
+        assert!(state.contains("0/5 current"));
+    }
+
+    #[test]
+    fn test_daemonset_state_description() {
+        use k8s_openapi::api::apps::v1::{DaemonSet, DaemonSetStatus};
+
+        let daemonset = DaemonSet {
+            status: Some(DaemonSetStatus {
+                desired_number_scheduled: 5,
+                number_ready: 3,
+                number_available: Some(3),
+                current_number_scheduled: 5,
+                number_misscheduled: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let state = daemonset.state_description();
+        assert!(state.contains("3/5 ready"));
+        assert!(state.contains("3/5 available"));
+    }
+
+    #[test]
+    fn test_daemonset_state_description_no_status() {
+        use k8s_openapi::api::apps::v1::DaemonSet;
+
+        let daemonset = DaemonSet {
+            status: None,
+            ..Default::default()
+        };
+
+        let state = daemonset.state_description();
+        assert!(state.contains("0/0 ready"));
+        assert!(state.contains("0/0 available"));
+    }
 }
