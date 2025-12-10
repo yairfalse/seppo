@@ -418,6 +418,10 @@ impl ServiceAssertion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::apps::v1::{DeploymentCondition, DeploymentStatus};
+    use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus, ServicePort, ServiceSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_assertion_error_display() {
@@ -434,5 +438,332 @@ mod tests {
 
         let err = AssertionError::KubeError("connection refused".to_string());
         assert_eq!(err.to_string(), "kubernetes error: connection refused");
+    }
+
+    // Helper to create a Pod with specific phase
+    fn make_pod_with_phase(phase: &str) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                phase: Some(phase.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    // Helper to create a Pod with labels
+    fn make_pod_with_labels(labels: &[(&str, &str)]) -> Pod {
+        let mut label_map = BTreeMap::new();
+        for (k, v) in labels {
+            label_map.insert(k.to_string(), v.to_string());
+        }
+        Pod {
+            metadata: ObjectMeta {
+                labels: Some(label_map),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    // Helper to create a Pod with container statuses
+    fn make_pod_with_containers(statuses: &[(&str, bool)]) -> Pod {
+        let container_statuses: Vec<ContainerStatus> = statuses
+            .iter()
+            .map(|(name, ready)| ContainerStatus {
+                name: name.to_string(),
+                ready: *ready,
+                ..Default::default()
+            })
+            .collect();
+        Pod {
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(container_statuses),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_pod_phase_running_check() {
+        let running_pod = make_pod_with_phase("Running");
+        let phase = running_pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        assert_eq!(phase, "Running");
+    }
+
+    #[test]
+    fn test_pod_phase_pending_check() {
+        let pending_pod = make_pod_with_phase("Pending");
+        let phase = pending_pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        assert_eq!(phase, "Pending");
+    }
+
+    #[test]
+    fn test_pod_phase_unknown_when_missing() {
+        let pod = Pod::default();
+        let phase = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        assert_eq!(phase, "Unknown");
+    }
+
+    #[test]
+    fn test_pod_label_check() {
+        let pod = make_pod_with_labels(&[("app", "myapp"), ("env", "prod")]);
+        let labels = pod.metadata.labels.as_ref().unwrap();
+
+        assert_eq!(labels.get("app"), Some(&"myapp".to_string()));
+        assert_eq!(labels.get("env"), Some(&"prod".to_string()));
+        assert_eq!(labels.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_pod_containers_ready_check() {
+        let pod = make_pod_with_containers(&[("main", true), ("sidecar", true)]);
+        let statuses = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref())
+            .unwrap();
+
+        assert!(statuses.iter().all(|c| c.ready));
+    }
+
+    #[test]
+    fn test_pod_containers_not_ready_check() {
+        let pod = make_pod_with_containers(&[("main", true), ("sidecar", false)]);
+        let statuses = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref())
+            .unwrap();
+
+        let not_ready: Vec<_> = statuses.iter().filter(|c| !c.ready).collect();
+        assert_eq!(not_ready.len(), 1);
+        assert_eq!(not_ready[0].name, "sidecar");
+    }
+
+    #[test]
+    fn test_deployment_replicas_check() {
+        let deployment = Deployment {
+            status: Some(DeploymentStatus {
+                ready_replicas: Some(3),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let ready = deployment
+            .status
+            .as_ref()
+            .and_then(|s| s.ready_replicas)
+            .unwrap_or(0);
+        assert_eq!(ready, 3);
+    }
+
+    #[test]
+    fn test_deployment_available_condition() {
+        let deployment = Deployment {
+            status: Some(DeploymentStatus {
+                conditions: Some(vec![DeploymentCondition {
+                    type_: "Available".to_string(),
+                    status: "True".to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let is_available = deployment
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conds| conds.iter().find(|c| c.type_ == "Available"))
+            .map(|c| c.status == "True")
+            .unwrap_or(false);
+
+        assert!(is_available);
+    }
+
+    #[test]
+    fn test_deployment_not_available_condition() {
+        let deployment = Deployment {
+            status: Some(DeploymentStatus {
+                conditions: Some(vec![DeploymentCondition {
+                    type_: "Available".to_string(),
+                    status: "False".to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let is_available = deployment
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conds| conds.iter().find(|c| c.type_ == "Available"))
+            .map(|c| c.status == "True")
+            .unwrap_or(false);
+
+        assert!(!is_available);
+    }
+
+    #[test]
+    fn test_service_port_check() {
+        let service = Service {
+            spec: Some(ServiceSpec {
+                ports: Some(vec![
+                    ServicePort {
+                        port: 80,
+                        ..Default::default()
+                    },
+                    ServicePort {
+                        port: 443,
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let ports = service
+            .spec
+            .as_ref()
+            .and_then(|s| s.ports.as_ref())
+            .unwrap();
+
+        assert!(ports.iter().any(|p| p.port == 80));
+        assert!(ports.iter().any(|p| p.port == 443));
+        assert!(!ports.iter().any(|p| p.port == 8080));
+    }
+
+    #[test]
+    fn test_service_type_check() {
+        let cluster_ip = Service {
+            spec: Some(ServiceSpec {
+                type_: Some("ClusterIP".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let lb = Service {
+            spec: Some(ServiceSpec {
+                type_: Some("LoadBalancer".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let default_service = Service::default();
+
+        // ClusterIP check
+        let svc_type = cluster_ip
+            .spec
+            .as_ref()
+            .and_then(|s| s.type_.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("ClusterIP");
+        assert_eq!(svc_type, "ClusterIP");
+
+        // LoadBalancer check
+        let svc_type = lb
+            .spec
+            .as_ref()
+            .and_then(|s| s.type_.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("ClusterIP");
+        assert_eq!(svc_type, "LoadBalancer");
+
+        // Default (nil spec) should default to ClusterIP
+        let svc_type = default_service
+            .spec
+            .as_ref()
+            .and_then(|s| s.type_.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("ClusterIP");
+        assert_eq!(svc_type, "ClusterIP");
+    }
+
+    #[test]
+    fn test_service_selector_check() {
+        let mut selector = BTreeMap::new();
+        selector.insert("app".to_string(), "myapp".to_string());
+
+        let service = Service {
+            spec: Some(ServiceSpec {
+                selector: Some(selector),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let sel = service.spec.as_ref().and_then(|s| s.selector.as_ref());
+        assert_eq!(sel.and_then(|s| s.get("app")), Some(&"myapp".to_string()));
+        assert_eq!(sel.and_then(|s| s.get("missing")), None);
+    }
+
+    #[test]
+    fn test_error_message_pod_running() {
+        // Test error message format for pod phase assertions
+        let name = "my-pod";
+        let phase = "Pending";
+        let err = AssertionError::Failed {
+            message: format!("expected pod/{} to be Running, got {}", name, phase),
+        };
+        assert!(err.to_string().contains("pod/my-pod"));
+        assert!(err.to_string().contains("Running"));
+        assert!(err.to_string().contains("Pending"));
+    }
+
+    #[test]
+    fn test_error_message_label_mismatch() {
+        let name = "my-pod";
+        let key = "app";
+        let expected = "frontend";
+        let actual = "backend";
+        let err = AssertionError::Failed {
+            message: format!(
+                "expected pod/{} to have label {}={}, got {}={}",
+                name, key, expected, key, actual
+            ),
+        };
+        assert!(err.to_string().contains("pod/my-pod"));
+        assert!(err.to_string().contains("app=frontend"));
+        assert!(err.to_string().contains("app=backend"));
+    }
+
+    #[test]
+    fn test_error_message_container_not_ready() {
+        let container_name = "sidecar";
+        let pod_name = "my-pod";
+        let err = AssertionError::Failed {
+            message: format!(
+                "container {} in pod/{} is not ready",
+                container_name, pod_name
+            ),
+        };
+        assert!(err.to_string().contains("sidecar"));
+        assert!(err.to_string().contains("pod/my-pod"));
+        assert!(err.to_string().contains("not ready"));
     }
 }
