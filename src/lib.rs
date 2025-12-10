@@ -58,11 +58,14 @@
 //! - **Minikube**: Local VM-based clusters
 //! - **Existing**: Use pre-existing clusters
 
+pub mod assertions;
 pub mod cluster;
 pub mod config;
 pub mod context;
 pub mod diagnostics;
 pub mod environment;
+pub mod eventually;
+pub mod fixtures;
 pub mod metrics;
 pub mod portforward;
 pub mod provider;
@@ -70,8 +73,10 @@ pub mod runner;
 pub mod scenario;
 pub mod stack;
 pub mod telemetry;
+pub mod wait;
 
 // Re-export commonly used types
+pub use assertions::{AssertionError, DeploymentAssertion, PodAssertion, ServiceAssertion};
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
 pub use context::{
@@ -80,6 +85,8 @@ pub use context::{
 };
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
+pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};
+pub use fixtures::{DeploymentFixture, PodFixture, ServiceFixture};
 pub use metrics::{metrics, SeppoMetrics};
 pub use portforward::{PortForward, PortForwardError};
 pub use provider::{
@@ -89,6 +96,7 @@ pub use runner::{run, run_with_env, RunResult, RunnerError};
 pub use scenario::{Scenario, ScenarioError, Steps};
 pub use stack::{ServiceBuilder, Stack, StackError};
 pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
+pub use wait::{ResourceState, WaitError, WaitEvent};
 
 // Re-export proc macros
 pub use seppo_macros::test;
