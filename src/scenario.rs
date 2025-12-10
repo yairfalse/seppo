@@ -10,19 +10,15 @@
 //! #[tokio::test]
 //! async fn test_user_api() {
 //!     Scenario::new("user-api")
-//!         .given("a running user service", |ctx| async move {
-//!             let deployment = DeploymentFixture::new("user-svc")
-//!                 .image("user-svc:test")
-//!                 .port(8080)
-//!                 .build();
-//!             ctx.apply(&deployment).await?;
-//!             ctx.wait_ready("deployment/user-svc").await?;
+//!         .given("a running user service", || async {
+//!             // Setup deployment here
+//!             // e.g., DeploymentFixture::new("user-svc").image("user-svc:test").port(8080).build();
 //!             Ok(())
 //!         })
-//!         .when("creating a user", |ctx| async move {
-//!             let pf = ctx.forward("svc/user-svc", 8080).await?;
-//!             let resp = pf.post("/users", "application/json", r#"{"name":"test"}"#).await?;
-//!             Ok(resp)
+//!         .when("creating a user", || async {
+//!             // Perform user creation here
+//!             // e.g., let resp = ...;
+//!             Ok(())
 //!         })
 //!         .then("the user should be created", |resp| {
 //!             assert!(resp.contains("id"));
