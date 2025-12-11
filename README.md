@@ -5,34 +5,46 @@
 ```rust
 use seppo::Context;
 
-// Standalone
 let ctx = Context::new().await?;
 ctx.apply(&deployment).await?;
 ctx.wait_ready("deployment/myapp").await?;
-
-// Or with test macro
-#[seppo::test]
-async fn test_my_app(ctx: Context) {
-    ctx.apply(&deployment).await?;
-    ctx.wait_ready("deployment/myapp").await?;
-
-    let pf = ctx.forward_to("svc/myapp", 8080).await?;
-    assert!(pf.get("/health").await?.contains("ok"));
-}
 ```
 
 ---
 
 ## Why
 
-Kubernetes tooling today means YAML, bash scripts, and complex frameworks that don't integrate with your language. You end up with a parallel infrastructure that's harder to maintain than the code it operates.
+**The problem:** Kubernetes tooling is fragmented. You write YAML, shell out to kubectl, maintain bash scripts, and wrestle with templating engines. Your "infrastructure as code" isn't really code—it's configuration files with code-like aspirations.
 
-Seppo is a native Rust library. Your K8s operations are Rust code. No external tools, no configuration languages, no impedance mismatch.
+**The vision:** What if Kubernetes operations were just... code? Real code. In your language. With types, IDE support, and compile-time checks.
 
-- **No YAML** — define resources in Rust
-- **No CLI** — library, not a tool
-- **Native kube-rs** — not kubectl shelling
-- **Works standalone or with tests**
+Seppo makes Kubernetes a library call:
+
+```rust
+// This is your deployment. No YAML.
+let deployment = DeploymentFixture::new("myapp")
+    .image("myapp:v1")
+    .replicas(3)
+    .port(8080)
+    .build();
+
+ctx.apply(&deployment).await?;
+ctx.wait_ready("deployment/myapp").await?;
+```
+
+No YAML. No kubectl. No templating. Just Rust.
+
+---
+
+## What We Want to Achieve
+
+1. **Escape YAML** — Define resources in code, not configuration files
+2. **Native SDK** — First-class Rust library, not a CLI wrapper
+3. **Full kubectl coverage** — Everything kubectl does, but programmatic
+4. **Ecosystem integration** — Import from Helm/Kustomize as migration path, then stay in code
+5. **Multi-language** — Same concepts in Rust (Seppo) and Go (Ilmari)
+
+The goal: you should never need to write YAML again.
 
 ---
 
@@ -41,20 +53,19 @@ Seppo is a native Rust library. Your K8s operations are Rust code. No external t
 ```
 ┌──────────────────┐     ┌─────────────────┐     ┌──────────────┐
 │  Context::new()  │────▶│     Context     │────▶│  Kubernetes  │
-│  or #[seppo::test]│     │   (namespace)   │     │   (Kind/EKS) │
+│  (your code)     │     │   (namespace)   │     │ (any cluster)│
 └──────────────────┘     └─────────────────┘     └──────────────┘
          │                       │
          │                       ├── apply()      → create resources
+         │                       ├── get/list()   → read resources
+         │                       ├── delete()     → remove resources
          │                       ├── wait_ready() → poll until ready
-         │                       ├── forward_to() → port forward
+         │                       ├── forward()    → port forward
          │                       ├── exec()       → run commands
-         │                       └── up()         → deploy stacks
-         │
-         └── cleanup() when done
-             (test macro: auto-cleanup on success, keep on failure)
+         │                       └── logs()       → stream logs
 ```
 
-Each `Context` gets an isolated namespace. Resources are created with `kube-rs`. The `#[seppo::test]` macro handles cleanup automatically.
+Each `Context` manages a namespace. Resources are created via `kube-rs`. The optional `#[seppo::test]` macro adds automatic cleanup and failure diagnostics.
 
 ---
 
@@ -65,7 +76,7 @@ Each `Context` gets an isolated namespace. Resources are created with `kube-rs`.
 seppo = "0.1"
 ```
 
-Requires: Docker + [Kind](https://kind.sigs.k8s.io/) (or existing cluster)
+Requires a Kubernetes cluster (Kind, Minikube, EKS, GKE, etc.)
 
 ---
 
@@ -83,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.apply(&my_deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    // Do stuff...
+    // Your operations here...
 
     ctx.cleanup().await?;
     Ok(())
@@ -94,57 +105,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use seppo::Context;
-use k8s_openapi::api::core::v1::ConfigMap;
 
 #[seppo::test]
-async fn test_configmap(ctx: Context) {
-    let cm = ConfigMap {
-        metadata: kube::api::ObjectMeta {
-            name: Some("myconfig".into()),
-            ..Default::default()
-        },
-        data: Some([("key".into(), "value".into())].into()),
-        ..Default::default()
-    };
-
-    ctx.apply(&cm).await.unwrap();
-
-    let fetched: ConfigMap = ctx.get("myconfig").await.unwrap();
-    assert_eq!(fetched.data.unwrap()["key"], "value");
-}
-```
-
-### Wait for Resources
-
-```rust
-#[seppo::test]
-async fn test_deployment(ctx: Context) {
-    ctx.apply(&deployment).await?;
-
-    // Wait until ready (understands K8s semantics)
-    ctx.wait_ready("deployment/myapp").await?;
-    ctx.wait_ready("pod/worker-0").await?;
-    ctx.wait_ready("svc/backend").await?;
-}
-```
-
-### Port Forward & HTTP
-
-```rust
-#[seppo::test]
-async fn test_api(ctx: Context) {
+async fn test_my_app(ctx: Context) {
     ctx.apply(&deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    // Forward to service (finds backing pod automatically)
     let pf = ctx.forward_to("svc/myapp", 8080).await?;
-
-    let health = pf.get("/health").await?;
-    assert!(health.contains("ok"));
+    assert!(pf.get("/health").await?.contains("ok"));
 }
+// Cleanup automatic on success, diagnostics on failure
 ```
 
-### Resource Builders (No YAML)
+### Resource Builders
 
 ```rust
 use seppo::DeploymentFixture;
@@ -154,6 +127,7 @@ let deployment = DeploymentFixture::new("myapp")
     .replicas(3)
     .port(80)
     .env("LOG_LEVEL", "debug")
+    .label("tier", "frontend")
     .build();
 
 ctx.apply(&deployment).await?;
@@ -164,39 +138,34 @@ ctx.apply(&deployment).await?;
 ```rust
 use seppo::Stack;
 
-#[seppo::test]
-async fn test_full_stack(ctx: Context) {
-    let stack = Stack::new()
-        .service("frontend")
-            .image("fe:test")
-            .replicas(2)
-            .port(80)
-        .service("backend")
-            .image("be:test")
-            .replicas(1)
-            .port(8080)
-        .service("worker")
-            .image("worker:test")
-            .replicas(3)
-        .build();
+let stack = Stack::new()
+    .service("frontend")
+        .image("fe:v1")
+        .replicas(2)
+        .port(80)
+    .service("backend")
+        .image("be:v1")
+        .replicas(3)
+        .port(8080)
+    .service("db")
+        .image("postgres:15")
+        .port(5432)
+    .build();
 
-    ctx.up(&stack).await?;
-
-    // All services deployed concurrently
-}
+ctx.up(&stack).await?;
 ```
 
-### Exec Commands
+### Async Conditions
 
 ```rust
-#[seppo::test]
-async fn test_exec(ctx: Context) {
-    ctx.apply(&pod).await?;
-    ctx.wait_ready("pod/myapp").await?;
+use seppo::eventually;
 
-    let output = ctx.exec("myapp", &["cat", "/etc/config"]).await?;
-    assert!(output.contains("expected"));
-}
+eventually(|| async {
+    let pods: Vec<Pod> = ctx.list().await?;
+    Ok(pods.len() >= 3)
+})
+.timeout(Duration::from_secs(60))
+.await?;
 ```
 
 ---
@@ -216,45 +185,49 @@ When tests fail, Seppo keeps the namespace and dumps diagnostics:
 [myapp-xyz123]
   ERROR: Connection refused to postgres:5432
 
-─── Events (2) ─────────────────────────────────────────────────
+─── Events ─────────────────────────────────────────────────────
   • 10:42:00  Pod/myapp  Scheduled  Assigned to node-1
   • 10:42:01  Pod/myapp  BackOff    Image pull error
 
 ─── Debug ──────────────────────────────────────────────────────
   kubectl -n seppo-test-a1b2c3d4 get all
-  kubectl delete ns seppo-test-a1b2c3d4  # cleanup
+  kubectl delete ns seppo-test-a1b2c3d4
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
-
-Set `SEPPO_KEEP_ALL=true` to keep namespaces even on success.
 
 ---
 
 ## Features
 
-| Feature | Status |
-|---------|--------|
-| `Context` (standalone) | Done |
-| `#[seppo::test]` macro | Done |
-| Isolated namespaces | Done |
-| apply/get/delete/list | Done |
-| wait_ready() | Done |
-| forward_to() (svc/deploy/pod) | Done |
-| exec() | Done |
-| Stack builder | Done |
-| DeploymentFixture/PodFixture/ServiceFixture | Done |
-| eventually/consistently helpers | Done |
-| Failure diagnostics | Done |
-| OpenTelemetry integration | Done |
-| Kind provider | Done |
-| Minikube provider | Done |
-| Existing cluster provider | Done |
+| Category | Features |
+|----------|----------|
+| **Core** | `Context`, apply/get/list/delete, wait_ready |
+| **Network** | Port forwarding, exec, logs |
+| **Builders** | DeploymentFixture, PodFixture, ServiceFixture, Stack |
+| **Testing** | `#[seppo::test]`, eventually/consistently, assertions |
+| **Diagnostics** | Pod logs, events, failure reports |
+| **Providers** | Kind, Minikube, existing clusters |
+| **Telemetry** | OpenTelemetry integration |
+
+---
+
+## Roadmap
+
+| Phase | Goal |
+|-------|------|
+| **0** | Rebrand as SDK, expose `Context::new()` standalone |
+| **1** | Complete primitives: patch, watch, copy, diff |
+| **2** | Helm/Kustomize import, migration CLI |
+| **3** | Operational: scale, rollback, restart, drain |
+| **4** | Multi-cluster, impersonation, audit |
 
 ---
 
 ## Name
 
-*Seppo* — Finnish name. The everyman. Like your code: reliable, unpretentious, gets the job done.
+*Seppo Ilmarinen* — the eternal hammerer, legendary smith of the Kalevala. He forged the Sampo, the mythical artifact of prosperity. Like Ilmarinen at his forge, Seppo shapes Kubernetes from raw code into running infrastructure.
+
+The Rust SDK is **Seppo**. The Go SDK is **Ilmari**. Same forge, different metals.
 
 ---
 
