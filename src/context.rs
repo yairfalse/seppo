@@ -604,7 +604,7 @@ impl Context {
     /// ```ignore
     /// use futures::StreamExt;
     ///
-    /// let mut stream = ctx.watch::<Pod>().await?;
+    /// let mut stream = ctx.watch::<Pod>();
     /// while let Some(event) = stream.next().await {
     ///     match event {
     ///         Ok(WatchEvent::Applied(pod)) => println!("Pod changed: {:?}", pod.metadata.name),
