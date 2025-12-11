@@ -549,6 +549,7 @@ impl Context {
             + std::fmt::Debug,
         <K as kube::Resource>::DynamicType: Default,
     {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_secs(1);
 
@@ -560,7 +561,7 @@ impl Context {
         );
 
         loop {
-            match self.get::<K>(name).await {
+            match api.get(name).await {
                 Ok(_) => {
                     // Resource still exists, keep waiting
                     debug!(
@@ -570,8 +571,8 @@ impl Context {
                         "Resource still exists, waiting for deletion..."
                     );
                 }
-                Err(ContextError::GetError(msg)) if msg.contains("NotFound") => {
-                    // Resource is gone
+                Err(kube::Error::Api(err)) if err.code == 404 => {
+                    // Resource is gone (HTTP 404 Not Found)
                     debug!(
                         namespace = %self.namespace,
                         resource = %name,
@@ -580,7 +581,9 @@ impl Context {
                     );
                     return Ok(());
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    return Err(ContextError::GetError(e.to_string()));
+                }
             }
 
             if start.elapsed() >= timeout {
@@ -1047,9 +1050,25 @@ impl Context {
         remote_path: &str,
         content: &str,
     ) -> Result<(), ContextError> {
-        // Escape content for shell
-        let escaped = content.replace('\'', "'\"'\"'");
-        let command = format!("printf '%s' '{}' > {}", escaped, remote_path);
+        // Validate remote_path to prevent command injection
+        if remote_path.contains(';')
+            || remote_path.contains('`')
+            || remote_path.contains('$')
+            || remote_path.contains('|')
+            || remote_path.contains('&')
+            || remote_path.contains('\n')
+            || remote_path.contains('\r')
+        {
+            return Err(ContextError::CopyError(format!(
+                "invalid path '{}': contains shell metacharacters",
+                remote_path
+            )));
+        }
+
+        // Escape content and path for shell
+        let escaped_content = content.replace('\'', "'\"'\"'");
+        let escaped_path = remote_path.replace('\'', "'\"'\"'");
+        let command = format!("printf '%s' '{}' > '{}'", escaped_content, escaped_path);
 
         self.exec(pod_name, &["sh", "-c", &command])
             .await
