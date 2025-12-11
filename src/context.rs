@@ -644,7 +644,7 @@ impl Context {
     /// ```ignore
     /// use futures::StreamExt;
     ///
-    /// let mut stream = ctx.watch_one::<Deployment>("myapp").await?;
+    /// let mut stream = ctx.watch_one::<Deployment>("myapp");
     /// while let Some(event) = stream.next().await {
     ///     if let Ok(WatchEvent::Applied(dep)) = event {
     ///         let ready = dep.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
