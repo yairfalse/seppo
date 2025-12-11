@@ -6,9 +6,11 @@
 use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
 use crate::stack::{Stack, StackError};
+use futures::Stream;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
-use kube::api::{Api, AttachParams, DeleteParams, ListParams, PostParams};
+use kube::api::{Api, AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
 use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
@@ -176,6 +178,9 @@ pub enum ContextError {
     #[error("Failed to apply resource: {0}")]
     ApplyError(String),
 
+    #[error("Failed to patch resource: {0}")]
+    PatchError(String),
+
     #[error("Failed to get resource: {0}")]
     GetError(String),
 
@@ -199,6 +204,12 @@ pub enum ContextError {
 
     #[error("Invalid resource reference: {0}")]
     InvalidResourceRef(String),
+
+    #[error("Watch error: {0}")]
+    WatchError(String),
+
+    #[error("Copy error: {0}")]
+    CopyError(String),
 }
 
 impl Context {
@@ -286,6 +297,51 @@ impl Context {
         );
 
         Ok(created)
+    }
+
+    /// Patch a resource in the test namespace using JSON Merge Patch
+    ///
+    /// Allows partial updates to a resource without replacing the entire spec.
+    /// Uses JSON Merge Patch (RFC 7396) - fields set to `null` are deleted,
+    /// other fields are merged.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use serde_json::json;
+    ///
+    /// // Update deployment replicas
+    /// ctx.patch::<Deployment>("myapp", &json!({
+    ///     "spec": { "replicas": 5 }
+    /// })).await?;
+    ///
+    /// // Add a label to a pod
+    /// ctx.patch::<Pod>("worker", &json!({
+    ///     "metadata": { "labels": { "version": "v2" } }
+    /// })).await?;
+    /// ```
+    pub async fn patch<K>(&self, name: &str, patch: &serde_json::Value) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let patched = api
+            .patch(name, &PatchParams::default(), &Patch::Merge(patch))
+            .await
+            .map_err(|e| ContextError::PatchError(e.to_string()))?;
+
+        info!(
+            namespace = %self.namespace,
+            name = %name,
+            "Patched resource"
+        );
+
+        Ok(patched)
     }
 
     /// Get a resource from the test namespace
@@ -454,6 +510,175 @@ impl Context {
 
             tokio::time::sleep(poll_interval).await;
         }
+    }
+
+    /// Wait for a resource to be deleted
+    ///
+    /// Polls until the resource no longer exists in the namespace.
+    /// Default timeout is 60 seconds, polling interval is 1 second.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.delete::<Pod>("worker").await?;
+    /// ctx.wait_deleted::<Pod>("worker").await?;
+    /// // Pod is now fully gone
+    /// ```
+    pub async fn wait_deleted<K>(&self, name: &str) -> Result<(), ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        self.wait_deleted_with_timeout::<K>(name, std::time::Duration::from_secs(60))
+            .await
+    }
+
+    /// Wait for a resource to be deleted with custom timeout
+    pub async fn wait_deleted_with_timeout<K>(
+        &self,
+        name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_secs(1);
+
+        debug!(
+            namespace = %self.namespace,
+            resource = %name,
+            timeout = ?timeout,
+            "Starting wait_deleted"
+        );
+
+        loop {
+            match api.get(name).await {
+                Ok(_) => {
+                    // Resource still exists, keep waiting
+                    debug!(
+                        namespace = %self.namespace,
+                        resource = %name,
+                        elapsed = ?start.elapsed(),
+                        "Resource still exists, waiting for deletion..."
+                    );
+                }
+                Err(kube::Error::Api(err)) if err.code == 404 => {
+                    // Resource is gone (HTTP 404 Not Found)
+                    debug!(
+                        namespace = %self.namespace,
+                        resource = %name,
+                        elapsed = ?start.elapsed(),
+                        "Resource deleted"
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(ContextError::GetError(e.to_string()));
+                }
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(ContextError::WaitTimeout(format!(
+                    "Timed out waiting for {} to be deleted after {:?}",
+                    name, timeout
+                )));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// Watch for changes to resources of a given type
+    ///
+    /// Returns a stream of watch events for all resources of type K in the namespace.
+    /// Events include Applied (create/update) and Deleted.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use futures::StreamExt;
+    ///
+    /// let mut stream = ctx.watch::<Pod>();
+    /// while let Some(event) = stream.next().await {
+    ///     match event {
+    ///         Ok(WatchEvent::Applied(pod)) => println!("Pod changed: {:?}", pod.metadata.name),
+    ///         Ok(WatchEvent::Deleted(pod)) => println!("Pod deleted: {:?}", pod.metadata.name),
+    ///         Err(e) => eprintln!("Watch error: {}", e),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    pub fn watch<K>(&self) -> impl Stream<Item = Result<WatchEvent<K>, watcher::Error>> + Send + '_
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug
+            + Send
+            + 'static,
+        <K as kube::Resource>::DynamicType: Default + Clone,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+        let config = watcher::Config::default();
+
+        debug!(
+            namespace = %self.namespace,
+            "Starting watch"
+        );
+
+        watcher::watcher(api, config)
+    }
+
+    /// Watch for changes to a specific resource
+    ///
+    /// Returns a stream of watch events for a single named resource.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use futures::StreamExt;
+    ///
+    /// let mut stream = ctx.watch_one::<Deployment>("myapp");
+    /// while let Some(event) = stream.next().await {
+    ///     if let Ok(WatchEvent::Applied(dep)) = event {
+    ///         let ready = dep.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
+    ///         println!("Deployment myapp: {} ready replicas", ready);
+    ///     }
+    /// }
+    /// ```
+    pub fn watch_one<K>(
+        &self,
+        name: &str,
+    ) -> impl Stream<Item = Result<WatchEvent<K>, watcher::Error>> + Send + '_
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug
+            + Send
+            + 'static,
+        <K as kube::Resource>::DynamicType: Default + Clone,
+    {
+        let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
+        let field_selector = format!("metadata.name={}", name);
+        let config = watcher::Config::default().fields(&field_selector);
+
+        debug!(
+            namespace = %self.namespace,
+            resource = %name,
+            "Starting watch for single resource"
+        );
+
+        watcher::watcher(api, config)
     }
 
     /// Wait for a resource to become ready
@@ -774,6 +999,91 @@ impl Context {
         );
 
         Ok(output)
+    }
+
+    /// Copy a file from a pod to the local filesystem
+    ///
+    /// Reads a file from the specified path in the pod and returns its contents.
+    /// Uses `cat` under the hood, so works with any pod that has this command.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let content = ctx.copy_from("my-pod", "/etc/config.yaml").await?;
+    /// println!("Config: {}", content);
+    /// ```
+    pub async fn copy_from(
+        &self,
+        pod_name: &str,
+        remote_path: &str,
+    ) -> Result<String, ContextError> {
+        let output = self
+            .exec(pod_name, &["cat", remote_path])
+            .await
+            .map_err(|e| {
+                ContextError::CopyError(format!("failed to read {}: {}", remote_path, e))
+            })?;
+
+        debug!(
+            namespace = %self.namespace,
+            pod = %pod_name,
+            path = %remote_path,
+            "Copied file from pod"
+        );
+
+        Ok(output)
+    }
+
+    /// Copy content to a file in a pod
+    ///
+    /// Writes the given content to a file at the specified path in the pod.
+    /// Uses shell redirection, so works with any pod that has a shell.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.copy_to("my-pod", "/tmp/config.yaml", "key: value\n").await?;
+    /// ```
+    pub async fn copy_to(
+        &self,
+        pod_name: &str,
+        remote_path: &str,
+        content: &str,
+    ) -> Result<(), ContextError> {
+        // Validate remote_path to prevent command injection
+        if remote_path.contains(';')
+            || remote_path.contains('`')
+            || remote_path.contains('$')
+            || remote_path.contains('|')
+            || remote_path.contains('&')
+            || remote_path.contains('\n')
+            || remote_path.contains('\r')
+        {
+            return Err(ContextError::CopyError(format!(
+                "invalid path '{}': contains shell metacharacters",
+                remote_path
+            )));
+        }
+
+        // Escape content and path for shell
+        let escaped_content = content.replace('\'', "'\"'\"'");
+        let escaped_path = remote_path.replace('\'', "'\"'\"'");
+        let command = format!("printf '%s' '{}' > '{}'", escaped_content, escaped_path);
+
+        self.exec(pod_name, &["sh", "-c", &command])
+            .await
+            .map_err(|e| {
+                ContextError::CopyError(format!("failed to write {}: {}", remote_path, e))
+            })?;
+
+        debug!(
+            namespace = %self.namespace,
+            pod = %pod_name,
+            path = %remote_path,
+            "Copied content to pod"
+        );
+
+        Ok(())
     }
 
     /// Create a port forward to a pod
@@ -1243,6 +1553,87 @@ mod tests {
         ctx.cleanup().await.expect("Should cleanup");
     }
 
+    /// Test that patch() updates a resource partially
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_patch_updates_resource() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a ConfigMap
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("patch-test".to_string()),
+                ..Default::default()
+            },
+            data: Some(
+                [("key1".to_string(), "value1".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Patch it - add a new key without removing existing one
+        let patched: ConfigMap = ctx
+            .patch(
+                "patch-test",
+                &serde_json::json!({
+                    "data": { "key2": "value2" }
+                }),
+            )
+            .await
+            .expect("Should patch ConfigMap");
+
+        // Verify the patch - should have both keys
+        let data = patched.data.expect("Should have data");
+        assert_eq!(data.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(data.get("key2"), Some(&"value2".to_string()));
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that wait_deleted() waits for resource to be gone
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_wait_deleted() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a ConfigMap
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("delete-wait-test".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        ctx.apply(&cm).await.expect("Should apply ConfigMap");
+
+        // Delete it
+        ctx.delete::<ConfigMap>("delete-wait-test")
+            .await
+            .expect("Should delete ConfigMap");
+
+        // Wait for it to be fully deleted
+        ctx.wait_deleted::<ConfigMap>("delete-wait-test")
+            .await
+            .expect("Should wait for deletion");
+
+        // Verify it's gone
+        let result: Result<ConfigMap, _> = ctx.get("delete-wait-test").await;
+        assert!(result.is_err(), "ConfigMap should be deleted");
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
     /// Test that list() returns resources from the test namespace
     #[tokio::test]
     #[ignore] // Requires real cluster
@@ -1580,6 +1971,61 @@ mod tests {
             .expect("Should exec command");
 
         assert!(output.contains("hello from exec"));
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that copy_to() and copy_from() transfer files
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_copy_to_and_from() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a simple pod
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("copy-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "test".to_string(),
+                    image: Some("busybox:latest".to_string()),
+                    command: Some(vec!["sleep".to_string(), "300".to_string()]),
+                    ..Default::default()
+                }],
+                restart_policy: Some("Never".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait for pod to be running
+        ctx.wait_for::<Pod, _>("copy-test", |p| {
+            p.status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .is_some_and(|phase| phase == "Running")
+        })
+        .await
+        .expect("Pod should be running");
+
+        // Copy content to a file in the pod
+        let test_content = "hello from seppo\nline 2\n";
+        ctx.copy_to("copy-test", "/tmp/test-file.txt", test_content)
+            .await
+            .expect("Should copy to pod");
+
+        // Read it back
+        let content = ctx
+            .copy_from("copy-test", "/tmp/test-file.txt")
+            .await
+            .expect("Should copy from pod");
+
+        assert_eq!(content, test_content);
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
