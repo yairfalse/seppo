@@ -101,5 +101,9 @@ pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGu
 pub use traffic::{HttpAssert, RequestRecord, TrafficError, TrafficRecorder};
 pub use wait::{ResourceState, WaitError, WaitEvent};
 
+// Re-export watcher types for watch() methods
+pub use kube::runtime::watcher::Error as WatcherError;
+pub use kube::runtime::watcher::Event as WatchEvent;
+
 // Re-export proc macros
 pub use seppo_macros::test;
