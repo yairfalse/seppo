@@ -268,8 +268,19 @@ impl Context {
 
     /// Apply a resource to the test namespace
     ///
-    /// Creates the resource in the test namespace, overriding any namespace
-    /// specified in the resource metadata.
+    /// Creates or updates the resource in the test namespace using server-side apply.
+    /// This works like `kubectl apply` - it will create if not exists, or update if exists.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // First apply creates
+    /// ctx.apply(&deployment).await?;
+    ///
+    /// // Second apply updates
+    /// deployment.spec.as_mut().unwrap().replicas = Some(5);
+    /// ctx.apply(&deployment).await?;
+    /// ```
     pub async fn apply<K>(&self, resource: &K) -> Result<K, ContextError>
     where
         K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
@@ -285,18 +296,27 @@ impl Context {
         let mut resource = resource.clone();
         resource.meta_mut().namespace = Some(self.namespace.clone());
 
-        let created = api
-            .create(&PostParams::default(), &resource)
+        // Get resource name for the patch call
+        let name = resource
+            .meta()
+            .name
+            .as_ref()
+            .ok_or_else(|| ContextError::ApplyError("resource must have a name".to_string()))?;
+
+        // Use server-side apply (like kubectl apply)
+        let patch_params = PatchParams::apply("seppo").force();
+        let applied = api
+            .patch(name, &patch_params, &Patch::Apply(&resource))
             .await
             .map_err(|e| ContextError::ApplyError(e.to_string()))?;
 
         info!(
             namespace = %self.namespace,
-            name = ?created.meta().name,
+            name = ?applied.meta().name,
             "Applied resource"
         );
 
-        Ok(created)
+        Ok(applied)
     }
 
     /// Patch a resource in the test namespace using JSON Merge Patch
