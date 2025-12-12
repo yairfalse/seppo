@@ -66,6 +66,7 @@ pub mod diagnostics;
 pub mod environment;
 pub mod eventually;
 pub mod fixtures;
+pub mod import;
 pub mod metrics;
 pub mod portforward;
 pub mod provider;
@@ -90,6 +91,7 @@ pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
 pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};
 pub use fixtures::{DeploymentFixture, PodFixture, ServiceFixture};
+pub use import::{helm_template, kustomize_build, HelmOptions, ImportError};
 pub use metrics::{metrics, SeppoMetrics};
 pub use portforward::{PortForward, PortForwardError};
 pub use provider::{

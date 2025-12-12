@@ -299,6 +299,84 @@ impl Context {
         Ok(created)
     }
 
+    /// Apply a raw YAML manifest to the test namespace
+    ///
+    /// Parses the YAML and creates the resource using the dynamic API.
+    /// Useful for applying manifests from Helm or Kustomize.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use seppo::import::helm_template;
+    ///
+    /// let manifests = helm_template("./charts/myapp", Default::default())?;
+    /// for yaml in manifests {
+    ///     ctx.apply_yaml(&yaml).await?;
+    /// }
+    /// ```
+    pub async fn apply_yaml(&self, yaml: &str) -> Result<serde_json::Value, ContextError> {
+        use kube::api::DynamicObject;
+        use kube::discovery::ApiResource;
+
+        // Parse YAML to JSON
+        let value: serde_json::Value = serde_yaml::from_str(yaml)
+            .map_err(|e| ContextError::ApplyError(format!("invalid YAML: {}", e)))?;
+
+        // Extract apiVersion and kind
+        let api_version = value["apiVersion"]
+            .as_str()
+            .ok_or_else(|| ContextError::ApplyError("missing apiVersion".to_string()))?;
+        let kind = value["kind"]
+            .as_str()
+            .ok_or_else(|| ContextError::ApplyError("missing kind".to_string()))?;
+
+        // Parse apiVersion into group and version
+        let (group, version) = if api_version.contains('/') {
+            let parts: Vec<&str> = api_version.splitn(2, '/').collect();
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            (String::new(), api_version.to_string())
+        };
+
+        // Build ApiResource
+        let plural = format!("{}s", kind.to_lowercase()); // Simple pluralization
+        let ar = ApiResource {
+            group,
+            version,
+            kind: kind.to_string(),
+            api_version: api_version.to_string(),
+            plural,
+        };
+
+        // Create DynamicObject from the value
+        let mut obj: DynamicObject = serde_json::from_value(value.clone())
+            .map_err(|e| ContextError::ApplyError(format!("invalid resource: {}", e)))?;
+
+        // Override namespace
+        obj.metadata.namespace = Some(self.namespace.clone());
+
+        // Create using dynamic API
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.namespace, &ar);
+
+        let created = api
+            .create(&PostParams::default(), &obj)
+            .await
+            .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+        let name = created.metadata.name.as_deref().unwrap_or("unknown");
+        info!(
+            namespace = %self.namespace,
+            kind = %kind,
+            name = %name,
+            "Applied YAML resource"
+        );
+
+        // Return the created resource as JSON
+        serde_json::to_value(created)
+            .map_err(|e| ContextError::ApplyError(format!("serialization error: {}", e)))
+    }
+
     /// Patch a resource in the test namespace using JSON Merge Patch
     ///
     /// Allows partial updates to a resource without replacing the entire spec.
