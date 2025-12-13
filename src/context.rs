@@ -270,6 +270,7 @@ impl Context {
     ///
     /// Creates or updates the resource in the test namespace using server-side apply.
     /// This works like `kubectl apply` - it will create if not exists, or update if exists.
+    /// Overrides any namespace specified in the resource metadata with the test namespace.
     ///
     /// # Example
     ///
