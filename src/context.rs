@@ -279,6 +279,7 @@ impl Context {
     /// ctx.apply(&deployment).await?;
     ///
     /// // Second apply updates
+    /// // Assuming spec is set
     /// deployment.spec.as_mut().unwrap().replicas = Some(5);
     /// ctx.apply(&deployment).await?;
     /// ```
