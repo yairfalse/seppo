@@ -268,8 +268,21 @@ impl Context {
 
     /// Apply a resource to the test namespace
     ///
-    /// Creates the resource in the test namespace, overriding any namespace
-    /// specified in the resource metadata.
+    /// Creates or updates the resource in the test namespace using server-side apply.
+    /// This works like `kubectl apply` - it will create if not exists, or update if exists.
+    /// Overrides any namespace specified in the resource metadata with the test namespace.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // First apply creates
+    /// ctx.apply(&deployment).await?;
+    ///
+    /// // Second apply updates
+    /// // Assuming spec is set
+    /// deployment.spec.as_mut().unwrap().replicas = Some(5);
+    /// ctx.apply(&deployment).await?;
+    /// ```
     pub async fn apply<K>(&self, resource: &K) -> Result<K, ContextError>
     where
         K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
@@ -285,18 +298,28 @@ impl Context {
         let mut resource = resource.clone();
         resource.meta_mut().namespace = Some(self.namespace.clone());
 
-        let created = api
-            .create(&PostParams::default(), &resource)
+        // Get resource name for the patch call
+        let name = resource
+            .meta()
+            .name
+            .as_ref()
+            .ok_or_else(|| ContextError::ApplyError("resource must have a name".to_string()))?;
+
+        // Use server-side apply (like kubectl apply)
+        // Field manager identifies who owns these fields for conflict detection
+        let patch_params = PatchParams::apply("seppo-sdk").force();
+        let applied = api
+            .patch(name, &patch_params, &Patch::Apply(&resource))
             .await
             .map_err(|e| ContextError::ApplyError(e.to_string()))?;
 
         info!(
             namespace = %self.namespace,
-            name = ?created.meta().name,
+            name = ?applied.meta().name,
             "Applied resource"
         );
 
-        Ok(created)
+        Ok(applied)
     }
 
     /// Patch a resource in the test namespace using JSON Merge Patch
@@ -1481,6 +1504,56 @@ mod tests {
             Some("test-config".to_string()),
             "Resource should have correct name"
         );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that apply() is idempotent - can update existing resources
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_apply_is_idempotent() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create initial ConfigMap
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("idempotent-test".to_string()),
+                ..Default::default()
+            },
+            data: Some(
+                [("key".to_string(), "value1".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        // First apply - creates
+        ctx.apply(&cm).await.expect("First apply should succeed");
+
+        // Second apply with same resource - should not error
+        ctx.apply(&cm)
+            .await
+            .expect("Second apply should succeed (idempotent)");
+
+        // Third apply with modified data - should update
+        let mut cm_updated = cm.clone();
+        cm_updated.data = Some(
+            [("key".to_string(), "value2".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let updated = ctx
+            .apply(&cm_updated)
+            .await
+            .expect("Third apply should update");
+
+        // Verify update was applied
+        let data = updated.data.expect("Should have data");
+        assert_eq!(data.get("key"), Some(&"value2".to_string()));
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
