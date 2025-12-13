@@ -306,7 +306,8 @@ impl Context {
             .ok_or_else(|| ContextError::ApplyError("resource must have a name".to_string()))?;
 
         // Use server-side apply (like kubectl apply)
-        let patch_params = PatchParams::apply("seppo").force();
+        // Field manager identifies who owns these fields for conflict detection
+        let patch_params = PatchParams::apply("seppo-sdk").force();
         let applied = api
             .patch(name, &patch_params, &Patch::Apply(&resource))
             .await
@@ -1503,6 +1504,56 @@ mod tests {
             Some("test-config".to_string()),
             "Resource should have correct name"
         );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that apply() is idempotent - can update existing resources
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_apply_is_idempotent() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create initial ConfigMap
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("idempotent-test".to_string()),
+                ..Default::default()
+            },
+            data: Some(
+                [("key".to_string(), "value1".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        // First apply - creates
+        ctx.apply(&cm).await.expect("First apply should succeed");
+
+        // Second apply with same resource - should not error
+        ctx.apply(&cm)
+            .await
+            .expect("Second apply should succeed (idempotent)");
+
+        // Third apply with modified data - should update
+        let mut cm_updated = cm.clone();
+        cm_updated.data = Some(
+            [("key".to_string(), "value2".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let updated = ctx
+            .apply(&cm_updated)
+            .await
+            .expect("Third apply should update");
+
+        // Verify update was applied
+        let data = updated.data.expect("Should have data");
+        assert_eq!(data.get("key"), Some(&"value2".to_string()));
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
