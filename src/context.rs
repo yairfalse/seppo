@@ -844,6 +844,53 @@ impl Context {
         Ok(())
     }
 
+    /// Immediately kill a pod (force deletion with grace period 0)
+    ///
+    /// Unlike `delete()`, this bypasses the graceful termination period
+    /// and kills the pod immediately. Useful for testing failure scenarios
+    /// and self-healing behavior.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Kill a pod immediately
+    /// ctx.kill("pod/worker-0").await?;
+    ///
+    /// // Verify the deployment recovers
+    /// ctx.wait_ready("deployment/myapp").await?;
+    /// ```
+    pub async fn kill(&self, resource: &str) -> Result<(), ContextError> {
+        let (kind, name) = parse_resource_ref(resource)?;
+
+        match kind {
+            ResourceKind::Pod => {
+                let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+                // Delete with grace period 0 for immediate termination
+                let delete_params = DeleteParams {
+                    grace_period_seconds: Some(0),
+                    ..Default::default()
+                };
+
+                pods.delete(name, &delete_params)
+                    .await
+                    .map_err(|e| ContextError::DeleteError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    pod = %name,
+                    "Killed pod (immediate deletion)"
+                );
+
+                Ok(())
+            }
+            _ => Err(ContextError::InvalidResourceRef(format!(
+                "kill only supports pods, got {:?}",
+                kind
+            ))),
+        }
+    }
+
     /// Scale a deployment to the specified number of replicas
     ///
     /// # Example
@@ -2565,6 +2612,63 @@ mod tests {
     // ============================================================
     // scale() tests
     // ============================================================
+
+    // ============================================================
+    // kill() tests
+    // ============================================================
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_kill_pod() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a pod
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("kill-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "nginx".to_string(),
+                    image: Some("nginx:alpine".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply pod");
+
+        // Wait for pod to be running
+        ctx.wait_ready("pod/kill-test")
+            .await
+            .expect("Pod should be running");
+
+        // Kill the pod (immediate deletion)
+        ctx.kill("pod/kill-test").await.expect("Should kill pod");
+
+        // Pod should be gone or terminating immediately
+        // Use a short timeout since kill should be fast
+        ctx.wait_deleted_with_timeout::<Pod>("kill-test", std::time::Duration::from_secs(10))
+            .await
+            .expect("Pod should be deleted quickly");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_kill_only_supports_pods() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // kill() should only work on pods
+        let result = ctx.kill("deployment/myapp").await;
+        assert!(result.is_err(), "kill should only work on pods");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
 
     #[tokio::test]
     #[ignore] // Requires real cluster
