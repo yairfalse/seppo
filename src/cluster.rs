@@ -144,7 +144,12 @@ mod tests {
                     // Check kernel version - Ubuntu 24.04 with kernel 6.8+ has issues
                     if let Ok(uname) = std::process::Command::new("uname").arg("-r").output() {
                         let kernel = String::from_utf8_lossy(&uname.stdout);
-                        if kernel.starts_with("6.8") || kernel.starts_with("6.9") || kernel.starts_with("6.10") || kernel.starts_with("6.11") {
+                        // Parse kernel version and check if >= 6.8
+                        let version_str = kernel.trim().split('-').next().unwrap_or("").trim();
+                        let mut parts = version_str.split('.');
+                        let major = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                        let minor = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                        if major > 6 || (major == 6 && minor >= 8) {
                             return std::env::var("SEPPO_FORCE_KIND_TEST").is_ok();
                         }
                     }

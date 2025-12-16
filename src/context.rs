@@ -210,6 +210,9 @@ pub enum ContextError {
 
     #[error("Copy error: {0}")]
     CopyError(String),
+
+    #[error("Rollback error: {0}")]
+    RollbackError(String),
 }
 
 impl Context {
@@ -989,40 +992,42 @@ impl Context {
                     .await
                     .map_err(|e| ContextError::GetError(e.to_string()))?;
 
+                // Helper to extract revision from a ReplicaSet
+                let get_revision = |rs: &ReplicaSet| -> i64 {
+                    rs.metadata
+                        .annotations
+                        .as_ref()
+                        .and_then(|ann| ann.get("deployment.kubernetes.io/revision"))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0)
+                };
+
+                // Filter by owner reference and valid revision (> 0)
                 let mut owned_rs: Vec<_> = rs_list
                     .items
                     .into_iter()
                     .filter(|rs| {
-                        rs.metadata
+                        let owned = rs
+                            .metadata
                             .owner_references
                             .as_ref()
                             .map(|refs| refs.iter().any(|r| r.uid.as_str() == dep_uid.as_str()))
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                        let has_revision = get_revision(rs) > 0;
+                        owned && has_revision
                     })
                     .collect();
 
                 if owned_rs.len() < 2 {
-                    return Err(ContextError::ApplyError(
+                    return Err(ContextError::RollbackError(
                         "no previous revision available for rollback".to_string(),
                     ));
                 }
 
                 // Sort by revision annotation (descending)
                 owned_rs.sort_by(|a, b| {
-                    let rev_a: i64 = a
-                        .metadata
-                        .annotations
-                        .as_ref()
-                        .and_then(|ann| ann.get("deployment.kubernetes.io/revision"))
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                    let rev_b: i64 = b
-                        .metadata
-                        .annotations
-                        .as_ref()
-                        .and_then(|ann| ann.get("deployment.kubernetes.io/revision"))
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
+                    let rev_a = get_revision(a);
+                    let rev_b = get_revision(b);
                     rev_b.cmp(&rev_a)
                 });
 
@@ -1033,7 +1038,7 @@ impl Context {
                     .as_ref()
                     .and_then(|s| s.template.clone())
                     .ok_or_else(|| {
-                        ContextError::ApplyError(
+                        ContextError::RollbackError(
                             "previous ReplicaSet has no pod template".to_string(),
                         )
                     })?;
@@ -1048,7 +1053,7 @@ impl Context {
                 deployments
                     .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
                     .await
-                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+                    .map_err(|e| ContextError::RollbackError(e.to_string()))?;
 
                 info!(
                     namespace = %self.namespace,
