@@ -7,7 +7,7 @@ use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
 use crate::stack::{Stack, StackError};
 use futures::Stream;
-use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::watcher::{self, Event as WatchEvent};
@@ -210,6 +210,9 @@ pub enum ContextError {
 
     #[error("Copy error: {0}")]
     CopyError(String),
+
+    #[error("Rollback error: {0}")]
+    RollbackError(String),
 }
 
 impl Context {
@@ -844,6 +847,53 @@ impl Context {
         Ok(())
     }
 
+    /// Immediately kill a pod (force deletion with grace period 0)
+    ///
+    /// Unlike `delete()`, this bypasses the graceful termination period
+    /// and kills the pod immediately. Useful for testing failure scenarios
+    /// and self-healing behavior.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Kill a pod immediately
+    /// ctx.kill("pod/worker-0").await?;
+    ///
+    /// // Verify the deployment recovers
+    /// ctx.wait_ready("deployment/myapp").await?;
+    /// ```
+    pub async fn kill(&self, resource: &str) -> Result<(), ContextError> {
+        let (kind, name) = parse_resource_ref(resource)?;
+
+        match kind {
+            ResourceKind::Pod => {
+                let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+                // Delete with grace period 0 for immediate termination
+                let delete_params = DeleteParams {
+                    grace_period_seconds: Some(0),
+                    ..Default::default()
+                };
+
+                pods.delete(name, &delete_params)
+                    .await
+                    .map_err(|e| ContextError::DeleteError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    pod = %name,
+                    "Killed pod (immediate deletion)"
+                );
+
+                Ok(())
+            }
+            _ => Err(ContextError::InvalidResourceRef(format!(
+                "kill only supports pods, got {:?}",
+                kind
+            ))),
+        }
+    }
+
     /// Scale a deployment to the specified number of replicas
     ///
     /// # Example
@@ -898,6 +948,123 @@ impl Context {
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
                 "scale only supports deployments, got {:?}",
+                kind
+            ))),
+        }
+    }
+
+    /// Rollback a deployment to the previous revision
+    ///
+    /// This finds the previous ReplicaSet revision and updates the deployment
+    /// to use that revision's pod template.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.rollback("deployment/myapp").await?;
+    /// ```
+    pub async fn rollback(&self, resource: &str) -> Result<(), ContextError> {
+        let (kind, name) = parse_resource_ref(resource)?;
+
+        match kind {
+            ResourceKind::Deployment => {
+                let deployments: Api<Deployment> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+                let replicasets: Api<ReplicaSet> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+
+                // Get current deployment
+                let dep = deployments
+                    .get(name)
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                // Get deployment UID for owner reference matching
+                let dep_uid = dep
+                    .metadata
+                    .uid
+                    .as_ref()
+                    .ok_or_else(|| ContextError::GetError("deployment has no UID".to_string()))?;
+
+                // List all ReplicaSets and filter by owner reference
+                let rs_list = replicasets
+                    .list(&ListParams::default())
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                // Helper to extract revision from a ReplicaSet
+                let get_revision = |rs: &ReplicaSet| -> i64 {
+                    rs.metadata
+                        .annotations
+                        .as_ref()
+                        .and_then(|ann| ann.get("deployment.kubernetes.io/revision"))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0)
+                };
+
+                // Filter by owner reference and valid revision (> 0)
+                let mut owned_rs: Vec<_> = rs_list
+                    .items
+                    .into_iter()
+                    .filter(|rs| {
+                        let owned = rs
+                            .metadata
+                            .owner_references
+                            .as_ref()
+                            .map(|refs| refs.iter().any(|r| r.uid.as_str() == dep_uid.as_str()))
+                            .unwrap_or(false);
+                        let has_revision = get_revision(rs) > 0;
+                        owned && has_revision
+                    })
+                    .collect();
+
+                if owned_rs.len() < 2 {
+                    return Err(ContextError::RollbackError(
+                        "no previous revision available for rollback".to_string(),
+                    ));
+                }
+
+                // Sort by revision annotation (descending)
+                owned_rs.sort_by(|a, b| {
+                    let rev_a = get_revision(a);
+                    let rev_b = get_revision(b);
+                    rev_b.cmp(&rev_a)
+                });
+
+                // Get the second-highest revision (previous)
+                let previous_rs = &owned_rs[1];
+                let previous_template = previous_rs
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.template.clone())
+                    .ok_or_else(|| {
+                        ContextError::RollbackError(
+                            "previous ReplicaSet has no pod template".to_string(),
+                        )
+                    })?;
+
+                // Patch the deployment with the previous template
+                let patch = serde_json::json!({
+                    "spec": {
+                        "template": previous_template
+                    }
+                });
+
+                deployments
+                    .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                    .await
+                    .map_err(|e| ContextError::RollbackError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    deployment = %name,
+                    "Rolled back deployment to previous revision"
+                );
+
+                Ok(())
+            }
+            _ => Err(ContextError::InvalidResourceRef(format!(
+                "rollback only supports deployments, got {:?}",
                 kind
             ))),
         }
@@ -1716,21 +1883,39 @@ mod tests {
         let ctx = Context::new().await.expect("Should create context");
 
         // Create multiple ConfigMaps
+        let mut created_names = Vec::new();
         for i in 0..3 {
+            let name = format!("list-test-config-{}", i);
             let cm = ConfigMap {
                 metadata: kube::api::ObjectMeta {
-                    name: Some(format!("config-{}", i)),
+                    name: Some(name.clone()),
                     ..Default::default()
                 },
                 ..Default::default()
             };
             ctx.apply(&cm).await.expect("Should apply ConfigMap");
+            created_names.push(name);
         }
 
-        // List them
-        let configs: Vec<ConfigMap> = ctx.list().await.expect("Should list ConfigMaps");
+        // Verify each ConfigMap exists individually
+        for name in &created_names {
+            let _: ConfigMap = ctx.get(name).await.expect("ConfigMap should exist");
+        }
 
-        assert_eq!(configs.len(), 3, "Should have 3 ConfigMaps");
+        // List them (filter to only our test ConfigMaps)
+        let configs: Vec<ConfigMap> = ctx.list().await.expect("Should list ConfigMaps");
+        let our_configs: Vec<_> = configs
+            .into_iter()
+            .filter(|cm| {
+                cm.metadata
+                    .name
+                    .as_ref()
+                    .map(|n| n.starts_with("list-test-config-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(our_configs.len(), 3, "Should have 3 ConfigMaps");
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
@@ -2565,6 +2750,200 @@ mod tests {
     // ============================================================
     // scale() tests
     // ============================================================
+
+    // ============================================================
+    // kill() tests
+    // ============================================================
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_kill_pod() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a pod
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("kill-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "nginx".to_string(),
+                    image: Some("nginx:alpine".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply pod");
+
+        // Wait for pod to be running
+        ctx.wait_ready("pod/kill-test")
+            .await
+            .expect("Pod should be running");
+
+        // Kill the pod (immediate deletion)
+        ctx.kill("pod/kill-test").await.expect("Should kill pod");
+
+        // Pod should be gone or terminating immediately
+        // Use a short timeout since kill should be fast
+        ctx.wait_deleted_with_timeout::<Pod>("kill-test", std::time::Duration::from_secs(10))
+            .await
+            .expect("Pod should be deleted quickly");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_kill_only_supports_pods() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // kill() should only work on pods
+        let result = ctx.kill("deployment/myapp").await;
+        assert!(result.is_err(), "kill should only work on pods");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    // ============================================================
+    // rollback() tests
+    // ============================================================
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_rollback_deployment() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a deployment with image v1
+        let deployment = Deployment {
+            metadata: kube::api::ObjectMeta {
+                name: Some("rollback-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                replicas: Some(1),
+                selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(
+                        [("app".to_string(), "rollback-test".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    metadata: Some(kube::api::ObjectMeta {
+                        labels: Some(
+                            [("app".to_string(), "rollback-test".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "nginx".to_string(),
+                            image: Some("nginx:1.24".to_string()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&deployment)
+            .await
+            .expect("Should apply deployment v1");
+        ctx.wait_ready("deployment/rollback-test")
+            .await
+            .expect("v1 should be ready");
+
+        // Update to v2
+        let mut deployment_v2 = deployment.clone();
+        deployment_v2
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .image = Some("nginx:1.25".to_string());
+
+        ctx.apply(&deployment_v2)
+            .await
+            .expect("Should apply deployment v2");
+        ctx.wait_ready("deployment/rollback-test")
+            .await
+            .expect("v2 should be ready");
+
+        // Verify we're on v2
+        let dep: Deployment = ctx
+            .get("rollback-test")
+            .await
+            .expect("Should get deployment");
+        let current_image = dep
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .image
+            .as_ref()
+            .unwrap();
+        assert_eq!(current_image, "nginx:1.25");
+
+        // Rollback to previous revision
+        ctx.rollback("deployment/rollback-test")
+            .await
+            .expect("Should rollback");
+
+        // Wait for rollback to complete
+        ctx.wait_ready("deployment/rollback-test")
+            .await
+            .expect("rollback should complete");
+
+        // Verify we're back on v1
+        let dep: Deployment = ctx
+            .get("rollback-test")
+            .await
+            .expect("Should get deployment");
+        let rolled_back_image = dep
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .image
+            .as_ref()
+            .unwrap();
+        assert_eq!(rolled_back_image, "nginx:1.24");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_rollback_only_supports_deployments() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        let result = ctx.rollback("pod/myapp").await;
+        assert!(result.is_err(), "rollback should only work on deployments");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
 
     #[tokio::test]
     #[ignore] // Requires real cluster
