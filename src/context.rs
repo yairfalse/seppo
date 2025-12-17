@@ -1070,6 +1070,135 @@ impl Context {
         }
     }
 
+    /// Restart a deployment, statefulset, or daemonset by triggering a rolling update
+    ///
+    /// This works like `kubectl rollout restart` - it adds a `restartedAt` annotation
+    /// to the pod template, which triggers Kubernetes to perform a rolling update.
+    ///
+    /// # Supported Resources
+    ///
+    /// - `deployment/name` or `deploy/name`
+    /// - `statefulset/name` or `sts/name`
+    /// - `daemonset/name` or `ds/name`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Restart a deployment
+    /// ctx.restart("deployment/myapp").await?;
+    ///
+    /// // Wait for the restart to complete
+    /// ctx.wait_ready("deployment/myapp").await?;
+    /// ```
+    pub async fn restart(&self, resource: &str) -> Result<(), ContextError> {
+        let (kind, name) = parse_resource_ref(resource)?;
+        let restarted_at = chrono::Utc::now().to_rfc3339();
+
+        match kind {
+            ResourceKind::Deployment => {
+                let deployments: Api<Deployment> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+
+                let mut dep = deployments
+                    .get(name)
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                // Get or create pod template annotations
+                let spec = dep.spec.as_mut().ok_or_else(|| {
+                    ContextError::ApplyError(format!("deployment '{}' has no spec", name))
+                })?;
+                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
+                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
+                annotations.insert(
+                    "kubectl.kubernetes.io/restartedAt".to_string(),
+                    restarted_at.clone(),
+                );
+
+                deployments
+                    .replace(name, &PostParams::default(), &dep)
+                    .await
+                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    deployment = %name,
+                    "Restarted deployment (rolling update triggered)"
+                );
+
+                Ok(())
+            }
+            ResourceKind::StatefulSet => {
+                let statefulsets: Api<StatefulSet> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+
+                let mut sts = statefulsets
+                    .get(name)
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                let spec = sts.spec.as_mut().ok_or_else(|| {
+                    ContextError::ApplyError(format!("statefulset '{}' has no spec", name))
+                })?;
+                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
+                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
+                annotations.insert(
+                    "kubectl.kubernetes.io/restartedAt".to_string(),
+                    restarted_at.clone(),
+                );
+
+                statefulsets
+                    .replace(name, &PostParams::default(), &sts)
+                    .await
+                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    statefulset = %name,
+                    "Restarted statefulset (rolling update triggered)"
+                );
+
+                Ok(())
+            }
+            ResourceKind::DaemonSet => {
+                let daemonsets: Api<DaemonSet> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+
+                let mut ds = daemonsets
+                    .get(name)
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                let spec = ds.spec.as_mut().ok_or_else(|| {
+                    ContextError::ApplyError(format!("daemonset '{}' has no spec", name))
+                })?;
+                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
+                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
+                annotations.insert(
+                    "kubectl.kubernetes.io/restartedAt".to_string(),
+                    restarted_at.clone(),
+                );
+
+                daemonsets
+                    .replace(name, &PostParams::default(), &ds)
+                    .await
+                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    daemonset = %name,
+                    "Restarted daemonset (rolling update triggered)"
+                );
+
+                Ok(())
+            }
+            _ => Err(ContextError::InvalidResourceRef(format!(
+                "restart only supports deployment, statefulset, and daemonset, got {:?}",
+                kind
+            ))),
+        }
+    }
+
     /// Get events from the test namespace
     ///
     /// Returns all events in the namespace, useful for debugging test failures.
@@ -3009,6 +3138,99 @@ mod tests {
 
         let dep: Deployment = ctx.get("scale-test").await.expect("Should get deployment");
         assert_eq!(dep.spec.as_ref().unwrap().replicas, Some(0));
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_restart_deployment() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a deployment
+        let deployment = Deployment {
+            metadata: kube::api::ObjectMeta {
+                name: Some("restart-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                replicas: Some(1),
+                selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(
+                        [("app".to_string(), "restart-test".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    metadata: Some(kube::api::ObjectMeta {
+                        labels: Some(
+                            [("app".to_string(), "restart-test".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "nginx".to_string(),
+                            image: Some("nginx:alpine".to_string()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&deployment)
+            .await
+            .expect("Should apply deployment");
+
+        // Restart the deployment
+        ctx.restart("deployment/restart-test")
+            .await
+            .expect("Should restart deployment");
+
+        // Verify the restart annotation was added to pod template
+        let dep: Deployment = ctx
+            .get("restart-test")
+            .await
+            .expect("Should get deployment");
+        let annotations = dep
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .annotations
+            .as_ref()
+            .expect("Should have annotations after restart");
+        assert!(
+            annotations.contains_key("kubectl.kubernetes.io/restartedAt"),
+            "Should have restartedAt annotation"
+        );
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_restart_only_supports_workloads() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Restart should not work on pods directly
+        let result = ctx.restart("pod/myapp").await;
+        assert!(result.is_err(), "restart should not work on pods");
+
+        // Restart should not work on services
+        let result = ctx.restart("service/myapp").await;
+        assert!(result.is_err(), "restart should not work on services");
 
         ctx.cleanup().await.expect("Should cleanup");
     }
