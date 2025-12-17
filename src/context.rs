@@ -37,6 +37,17 @@ pub enum ForwardTarget {
     Deployment(String),
 }
 
+/// Extract just the resource name from either "name" or "kind/name" format
+///
+/// This helper allows methods to accept both formats for consistency:
+/// - `"myapp"` → `"myapp"`
+/// - `"deployment/myapp"` → `"myapp"`
+/// - `"pod/worker-0"` → `"worker-0"`
+pub fn extract_resource_name(reference: &str) -> &str {
+    // If there's a slash, take everything after it
+    reference.split('/').last().unwrap_or(reference)
+}
+
 /// Parse a resource reference like "deployment/myapp" into (kind, name)
 ///
 /// Supports kubectl-style aliases:
@@ -567,12 +578,21 @@ impl Context {
     /// Polls the resource until the condition returns true or timeout is reached.
     /// Default timeout is 60 seconds, polling interval is 1 second.
     ///
+    /// Accepts both formats for consistency with other methods:
+    /// - `"my-config"` - just the resource name
+    /// - `"configmap/my-config"` - kind/name format (kind is ignored, type comes from generic)
+    ///
     /// # Example
     ///
     /// ```ignore
     /// // Wait for a ConfigMap to have a specific key
     /// ctx.wait_for::<ConfigMap>("my-config", |cm| {
     ///     cm.data.as_ref().map_or(false, |d| d.contains_key("ready"))
+    /// }).await?;
+    ///
+    /// // Also works with kind/name format
+    /// ctx.wait_for::<Gateway>("gateway/test-gw", |gw| {
+    ///     gw.status.is_some()
     /// }).await?;
     /// ```
     pub async fn wait_for<K, F>(&self, name: &str, condition: F) -> Result<K, ContextError>
@@ -589,6 +609,8 @@ impl Context {
     }
 
     /// Wait for a resource with custom timeout
+    ///
+    /// Accepts both `"name"` and `"kind/name"` formats for consistency.
     pub async fn wait_for_with_timeout<K, F>(
         &self,
         name: &str,
@@ -603,6 +625,8 @@ impl Context {
         <K as kube::Resource>::DynamicType: Default,
         F: Fn(&K) -> bool,
     {
+        // Extract just the name if "kind/name" format was provided
+        let name = extract_resource_name(name);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_secs(1);
 
@@ -659,12 +683,17 @@ impl Context {
     /// Polls until the resource no longer exists in the namespace.
     /// Default timeout is 60 seconds, polling interval is 1 second.
     ///
+    /// Accepts both `"name"` and `"kind/name"` formats for consistency.
+    ///
     /// # Example
     ///
     /// ```ignore
     /// ctx.delete::<Pod>("worker").await?;
     /// ctx.wait_deleted::<Pod>("worker").await?;
     /// // Pod is now fully gone
+    ///
+    /// // Also works with kind/name format
+    /// ctx.wait_deleted::<Pod>("pod/worker").await?;
     /// ```
     pub async fn wait_deleted<K>(&self, name: &str) -> Result<(), ContextError>
     where
@@ -679,6 +708,8 @@ impl Context {
     }
 
     /// Wait for a resource to be deleted with custom timeout
+    ///
+    /// Accepts both `"name"` and `"kind/name"` formats for consistency.
     pub async fn wait_deleted_with_timeout<K>(
         &self,
         name: &str,
@@ -691,6 +722,8 @@ impl Context {
             + std::fmt::Debug,
         <K as kube::Resource>::DynamicType: Default,
     {
+        // Extract just the name if "kind/name" format was provided
+        let name = extract_resource_name(name);
         let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_secs(1);
@@ -1817,6 +1850,31 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============================================================
+    // Unit tests (no cluster required)
+    // ============================================================
+
+    #[test]
+    fn test_extract_resource_name() {
+        // Just name
+        assert_eq!(extract_resource_name("myapp"), "myapp");
+        assert_eq!(extract_resource_name("test-gateway"), "test-gateway");
+
+        // Kind/name format - should extract just the name
+        assert_eq!(extract_resource_name("deployment/myapp"), "myapp");
+        assert_eq!(extract_resource_name("gateway/test-gateway"), "test-gateway");
+        assert_eq!(extract_resource_name("pod/worker-0"), "worker-0");
+        assert_eq!(extract_resource_name("configmap/my-config"), "my-config");
+
+        // Edge cases
+        assert_eq!(extract_resource_name(""), "");
+        assert_eq!(extract_resource_name("a/b/c"), "c"); // Multiple slashes: takes last part
+    }
+
+    // ============================================================
+    // Integration tests (require cluster)
+    // ============================================================
 
     /// RED: Test that Context::new() creates a namespace
     #[tokio::test]
