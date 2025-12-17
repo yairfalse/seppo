@@ -325,6 +325,64 @@ impl Context {
         Ok(applied)
     }
 
+    /// Apply a cluster-scoped resource (create or update)
+    ///
+    /// Use this for resources that are not namespaced, such as:
+    /// - ClusterRole, ClusterRoleBinding
+    /// - GatewayClass
+    /// - CustomResourceDefinition
+    /// - Namespace
+    /// - PersistentVolume
+    /// - StorageClass
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use k8s_openapi::api::rbac::v1::ClusterRole;
+    ///
+    /// let role = ClusterRole {
+    ///     metadata: ObjectMeta {
+    ///         name: Some("my-cluster-role".to_string()),
+    ///         ..Default::default()
+    ///     },
+    ///     rules: Some(vec![]),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// ctx.apply_cluster(&role).await?;
+    /// ```
+    pub async fn apply_cluster<K>(&self, resource: &K) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::ClusterResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::all(self.client.clone());
+
+        let name = resource
+            .meta()
+            .name
+            .as_ref()
+            .ok_or_else(|| ContextError::ApplyError("resource must have a name".to_string()))?;
+
+        // Use server-side apply (like kubectl apply)
+        let patch_params = PatchParams::apply("seppo-sdk").force();
+        let applied = api
+            .patch(name, &patch_params, &Patch::Apply(resource))
+            .await
+            .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+        info!(
+            name = ?applied.meta().name,
+            "Applied cluster-scoped resource"
+        );
+
+        Ok(applied)
+    }
+
     /// Patch a resource in the test namespace using JSON Merge Patch
     ///
     /// Allows partial updates to a resource without replacing the entire spec.
@@ -389,6 +447,33 @@ impl Context {
         Ok(resource)
     }
 
+    /// Get a cluster-scoped resource
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use k8s_openapi::api::rbac::v1::ClusterRole;
+    ///
+    /// let role: ClusterRole = ctx.get_cluster("my-cluster-role").await?;
+    /// ```
+    pub async fn get_cluster<K>(&self, name: &str) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::ClusterResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::all(self.client.clone());
+
+        let resource = api
+            .get(name)
+            .await
+            .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+        Ok(resource)
+    }
+
     /// Delete a resource from the test namespace
     pub async fn delete<K>(&self, name: &str) -> Result<(), ContextError>
     where
@@ -408,6 +493,37 @@ impl Context {
             namespace = %self.namespace,
             name = %name,
             "Deleted resource"
+        );
+
+        Ok(())
+    }
+
+    /// Delete a cluster-scoped resource
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use k8s_openapi::api::rbac::v1::ClusterRole;
+    ///
+    /// ctx.delete_cluster::<ClusterRole>("my-cluster-role").await?;
+    /// ```
+    pub async fn delete_cluster<K>(&self, name: &str) -> Result<(), ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::ClusterResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::all(self.client.clone());
+
+        api.delete(name, &DeleteParams::default())
+            .await
+            .map_err(|e| ContextError::DeleteError(e.to_string()))?;
+
+        info!(
+            name = %name,
+            "Deleted cluster-scoped resource"
         );
 
         Ok(())
@@ -3231,6 +3347,121 @@ mod tests {
         // Restart should not work on services
         let result = ctx.restart("service/myapp").await;
         assert!(result.is_err(), "restart should not work on services");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_apply_cluster_scoped_resource() {
+        use k8s_openapi::api::rbac::v1::ClusterRole;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a cluster-scoped resource (ClusterRole)
+        // Use a unique name to avoid conflicts
+        let role_name = format!("seppo-test-role-{}", uuid::Uuid::new_v4());
+        let cluster_role = ClusterRole {
+            metadata: kube::api::ObjectMeta {
+                name: Some(role_name.clone()),
+                labels: Some(
+                    [("seppo.io/test".to_string(), "true".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            rules: Some(vec![]),
+            ..Default::default()
+        };
+
+        // Apply cluster-scoped resource
+        let applied = ctx
+            .apply_cluster(&cluster_role)
+            .await
+            .expect("Should apply cluster-scoped resource");
+
+        assert_eq!(applied.metadata.name, Some(role_name.clone()));
+
+        // Clean up the cluster role manually (not namespace-scoped)
+        let api: Api<ClusterRole> = Api::all(ctx.client.clone());
+        api.delete(&role_name, &DeleteParams::default())
+            .await
+            .expect("Should delete cluster role");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_get_cluster_scoped_resource() {
+        use k8s_openapi::api::rbac::v1::ClusterRole;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a cluster role first
+        let role_name = format!("seppo-test-role-{}", uuid::Uuid::new_v4());
+        let cluster_role = ClusterRole {
+            metadata: kube::api::ObjectMeta {
+                name: Some(role_name.clone()),
+                ..Default::default()
+            },
+            rules: Some(vec![]),
+            ..Default::default()
+        };
+
+        ctx.apply_cluster(&cluster_role)
+            .await
+            .expect("Should apply");
+
+        // Get it back using get_cluster
+        let fetched: ClusterRole = ctx
+            .get_cluster(&role_name)
+            .await
+            .expect("Should get cluster-scoped resource");
+
+        assert_eq!(fetched.metadata.name, Some(role_name.clone()));
+
+        // Clean up
+        let api: Api<ClusterRole> = Api::all(ctx.client.clone());
+        api.delete(&role_name, &DeleteParams::default())
+            .await
+            .expect("Should delete");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_delete_cluster_scoped_resource() {
+        use k8s_openapi::api::rbac::v1::ClusterRole;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a cluster role first
+        let role_name = format!("seppo-test-role-{}", uuid::Uuid::new_v4());
+        let cluster_role = ClusterRole {
+            metadata: kube::api::ObjectMeta {
+                name: Some(role_name.clone()),
+                ..Default::default()
+            },
+            rules: Some(vec![]),
+            ..Default::default()
+        };
+
+        ctx.apply_cluster(&cluster_role)
+            .await
+            .expect("Should apply");
+
+        // Delete using delete_cluster
+        ctx.delete_cluster::<ClusterRole>(&role_name)
+            .await
+            .expect("Should delete cluster-scoped resource");
+
+        // Verify it's gone
+        let api: Api<ClusterRole> = Api::all(ctx.client.clone());
+        let result = api.get(&role_name).await;
+        assert!(result.is_err(), "Resource should be deleted");
 
         ctx.cleanup().await.expect("Should cleanup");
     }
