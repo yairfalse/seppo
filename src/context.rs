@@ -37,6 +37,17 @@ pub enum ForwardTarget {
     Deployment(String),
 }
 
+/// Extract just the resource name from either "name" or "kind/name" format
+///
+/// This helper allows methods to accept both formats for consistency:
+/// - `"myapp"` → `"myapp"`
+/// - `"deployment/myapp"` → `"myapp"`
+/// - `"pod/worker-0"` → `"worker-0"`
+pub fn extract_resource_name(reference: &str) -> &str {
+    // If there's a slash, take everything after it
+    reference.split('/').last().unwrap_or(reference)
+}
+
 /// Parse a resource reference like "deployment/myapp" into (kind, name)
 ///
 /// Supports kubectl-style aliases:
@@ -325,6 +336,64 @@ impl Context {
         Ok(applied)
     }
 
+    /// Apply a cluster-scoped resource (create or update)
+    ///
+    /// Use this for resources that are not namespaced, such as:
+    /// - ClusterRole, ClusterRoleBinding
+    /// - GatewayClass
+    /// - CustomResourceDefinition
+    /// - Namespace
+    /// - PersistentVolume
+    /// - StorageClass
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use k8s_openapi::api::rbac::v1::ClusterRole;
+    ///
+    /// let role = ClusterRole {
+    ///     metadata: ObjectMeta {
+    ///         name: Some("my-cluster-role".to_string()),
+    ///         ..Default::default()
+    ///     },
+    ///     rules: Some(vec![]),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// ctx.apply_cluster(&role).await?;
+    /// ```
+    pub async fn apply_cluster<K>(&self, resource: &K) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::ClusterResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::all(self.client.clone());
+
+        let name = resource
+            .meta()
+            .name
+            .as_ref()
+            .ok_or_else(|| ContextError::ApplyError("resource must have a name".to_string()))?;
+
+        // Use server-side apply (like kubectl apply)
+        let patch_params = PatchParams::apply("seppo-sdk").force();
+        let applied = api
+            .patch(name, &patch_params, &Patch::Apply(resource))
+            .await
+            .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+        info!(
+            name = ?applied.meta().name,
+            "Applied cluster-scoped resource"
+        );
+
+        Ok(applied)
+    }
+
     /// Patch a resource in the test namespace using JSON Merge Patch
     ///
     /// Allows partial updates to a resource without replacing the entire spec.
@@ -389,6 +458,33 @@ impl Context {
         Ok(resource)
     }
 
+    /// Get a cluster-scoped resource
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use k8s_openapi::api::rbac::v1::ClusterRole;
+    ///
+    /// let role: ClusterRole = ctx.get_cluster("my-cluster-role").await?;
+    /// ```
+    pub async fn get_cluster<K>(&self, name: &str) -> Result<K, ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::ClusterResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::all(self.client.clone());
+
+        let resource = api
+            .get(name)
+            .await
+            .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+        Ok(resource)
+    }
+
     /// Delete a resource from the test namespace
     pub async fn delete<K>(&self, name: &str) -> Result<(), ContextError>
     where
@@ -408,6 +504,37 @@ impl Context {
             namespace = %self.namespace,
             name = %name,
             "Deleted resource"
+        );
+
+        Ok(())
+    }
+
+    /// Delete a cluster-scoped resource
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use k8s_openapi::api::rbac::v1::ClusterRole;
+    ///
+    /// ctx.delete_cluster::<ClusterRole>("my-cluster-role").await?;
+    /// ```
+    pub async fn delete_cluster<K>(&self, name: &str) -> Result<(), ContextError>
+    where
+        K: kube::Resource<Scope = kube::core::ClusterResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + std::fmt::Debug,
+        <K as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<K> = Api::all(self.client.clone());
+
+        api.delete(name, &DeleteParams::default())
+            .await
+            .map_err(|e| ContextError::DeleteError(e.to_string()))?;
+
+        info!(
+            name = %name,
+            "Deleted cluster-scoped resource"
         );
 
         Ok(())
@@ -434,8 +561,6 @@ impl Context {
 
     /// Get logs from a pod in the test namespace
     pub async fn logs(&self, pod_name: &str) -> Result<String, ContextError> {
-        use k8s_openapi::api::core::v1::Pod;
-
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
 
         let logs = pods
@@ -446,10 +571,77 @@ impl Context {
         Ok(logs)
     }
 
+    /// Get logs from all pods matching a label selector
+    ///
+    /// Returns a HashMap of pod name to logs. Useful for debugging deployments
+    /// with multiple replicas or getting logs from all pods in a service.
+    ///
+    /// # Arguments
+    ///
+    /// * `selector` - Label selector string, e.g., "app=myapp" or "app=myapp,tier=backend"
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get logs from all pods with label app=myapp
+    /// let all_logs = ctx.logs_all("app=myapp").await?;
+    /// for (pod_name, logs) in &all_logs {
+    ///     println!("=== {} ===\n{}", pod_name, logs);
+    /// }
+    /// ```
+    pub async fn logs_all(&self, selector: &str) -> Result<HashMap<String, String>, ContextError> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        // List pods matching the selector
+        let list_params = ListParams::default().labels(selector);
+        let pod_list = pods
+            .list(&list_params)
+            .await
+            .map_err(|e| ContextError::ListError(e.to_string()))?;
+
+        let mut all_logs = HashMap::new();
+
+        for pod in pod_list.items {
+            let pod_name = pod.metadata.name.unwrap_or_default();
+            if pod_name.is_empty() {
+                continue;
+            }
+
+            // Try to get logs, but don't fail if a pod doesn't have logs yet
+            match pods.logs(&pod_name, &Default::default()).await {
+                Ok(logs) => {
+                    all_logs.insert(pod_name, logs);
+                }
+                Err(e) => {
+                    debug!(
+                        pod = %pod_name,
+                        error = %e,
+                        "Could not get logs from pod (may not be ready yet)"
+                    );
+                    // Insert empty string to indicate pod exists but no logs
+                    all_logs.insert(pod_name, String::new());
+                }
+            }
+        }
+
+        info!(
+            namespace = %self.namespace,
+            selector = %selector,
+            pod_count = %all_logs.len(),
+            "Collected logs from pods"
+        );
+
+        Ok(all_logs)
+    }
+
     /// Wait for a resource to satisfy a condition
     ///
     /// Polls the resource until the condition returns true or timeout is reached.
     /// Default timeout is 60 seconds, polling interval is 1 second.
+    ///
+    /// Accepts both formats for consistency with other methods:
+    /// - `"my-config"` - just the resource name
+    /// - `"configmap/my-config"` - kind/name format (kind is ignored, type comes from generic)
     ///
     /// # Example
     ///
@@ -457,6 +649,11 @@ impl Context {
     /// // Wait for a ConfigMap to have a specific key
     /// ctx.wait_for::<ConfigMap>("my-config", |cm| {
     ///     cm.data.as_ref().map_or(false, |d| d.contains_key("ready"))
+    /// }).await?;
+    ///
+    /// // Also works with kind/name format
+    /// ctx.wait_for::<Gateway>("gateway/test-gw", |gw| {
+    ///     gw.status.is_some()
     /// }).await?;
     /// ```
     pub async fn wait_for<K, F>(&self, name: &str, condition: F) -> Result<K, ContextError>
@@ -473,6 +670,8 @@ impl Context {
     }
 
     /// Wait for a resource with custom timeout
+    ///
+    /// Accepts both `"name"` and `"kind/name"` formats for consistency.
     pub async fn wait_for_with_timeout<K, F>(
         &self,
         name: &str,
@@ -487,6 +686,8 @@ impl Context {
         <K as kube::Resource>::DynamicType: Default,
         F: Fn(&K) -> bool,
     {
+        // Extract just the name if "kind/name" format was provided
+        let name = extract_resource_name(name);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_secs(1);
 
@@ -543,12 +744,17 @@ impl Context {
     /// Polls until the resource no longer exists in the namespace.
     /// Default timeout is 60 seconds, polling interval is 1 second.
     ///
+    /// Accepts both `"name"` and `"kind/name"` formats for consistency.
+    ///
     /// # Example
     ///
     /// ```ignore
     /// ctx.delete::<Pod>("worker").await?;
     /// ctx.wait_deleted::<Pod>("worker").await?;
     /// // Pod is now fully gone
+    ///
+    /// // Also works with kind/name format
+    /// ctx.wait_deleted::<Pod>("pod/worker").await?;
     /// ```
     pub async fn wait_deleted<K>(&self, name: &str) -> Result<(), ContextError>
     where
@@ -563,6 +769,8 @@ impl Context {
     }
 
     /// Wait for a resource to be deleted with custom timeout
+    ///
+    /// Accepts both `"name"` and `"kind/name"` formats for consistency.
     pub async fn wait_deleted_with_timeout<K>(
         &self,
         name: &str,
@@ -575,6 +783,8 @@ impl Context {
             + std::fmt::Debug,
         <K as kube::Resource>::DynamicType: Default,
     {
+        // Extract just the name if "kind/name" format was provided
+        let name = extract_resource_name(name);
         let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_secs(1);
@@ -1065,6 +1275,86 @@ impl Context {
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
                 "rollback only supports deployments, got {:?}",
+                kind
+            ))),
+        }
+    }
+
+    /// Restart a deployment, statefulset, or daemonset by triggering a rolling update
+    ///
+    /// This works like `kubectl rollout restart` - it adds a `restartedAt` annotation
+    /// to the pod template, which triggers Kubernetes to perform a rolling update.
+    ///
+    /// # Supported Resources
+    ///
+    /// - `deployment/name` or `deploy/name`
+    /// - `statefulset/name` or `sts/name`
+    /// - `daemonset/name` or `ds/name`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Restart a deployment
+    /// ctx.restart("deployment/myapp").await?;
+    ///
+    /// // Wait for the restart to complete
+    /// ctx.wait_ready("deployment/myapp").await?;
+    /// ```
+    pub async fn restart(&self, resource: &str) -> Result<(), ContextError> {
+        let (kind, name) = parse_resource_ref(resource)?;
+        let restarted_at = chrono::Utc::now().to_rfc3339();
+
+        // Helper macro to reduce duplication across resource types
+        macro_rules! restart_workload {
+            ($api:expr, $resource:expr, $kind_name:expr) => {{
+                let mut workload = $api
+                    .get(name)
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                let spec = workload.spec.as_mut().ok_or_else(|| {
+                    ContextError::ApplyError(format!("{} '{}' has no spec", $kind_name, name))
+                })?;
+                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
+                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
+                annotations.insert(
+                    "kubectl.kubernetes.io/restartedAt".to_string(),
+                    restarted_at.clone(),
+                );
+
+                $api.replace(name, &PostParams::default(), &workload)
+                    .await
+                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    resource = %name,
+                    kind = %$kind_name,
+                    "Restarted workload (rolling update triggered)"
+                );
+
+                Ok(())
+            }};
+        }
+
+        match kind {
+            ResourceKind::Deployment => {
+                let api: Api<Deployment> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+                restart_workload!(api, name, "deployment")
+            }
+            ResourceKind::StatefulSet => {
+                let api: Api<StatefulSet> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+                restart_workload!(api, name, "statefulset")
+            }
+            ResourceKind::DaemonSet => {
+                let api: Api<DaemonSet> =
+                    Api::namespaced(self.client.clone(), &self.namespace);
+                restart_workload!(api, name, "daemonset")
+            }
+            _ => Err(ContextError::InvalidResourceRef(format!(
+                "restart only supports deployment, statefulset, and daemonset, got {:?}",
                 kind
             ))),
         }
@@ -1572,6 +1862,31 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============================================================
+    // Unit tests (no cluster required)
+    // ============================================================
+
+    #[test]
+    fn test_extract_resource_name() {
+        // Just name
+        assert_eq!(extract_resource_name("myapp"), "myapp");
+        assert_eq!(extract_resource_name("test-gateway"), "test-gateway");
+
+        // Kind/name format - should extract just the name
+        assert_eq!(extract_resource_name("deployment/myapp"), "myapp");
+        assert_eq!(extract_resource_name("gateway/test-gateway"), "test-gateway");
+        assert_eq!(extract_resource_name("pod/worker-0"), "worker-0");
+        assert_eq!(extract_resource_name("configmap/my-config"), "my-config");
+
+        // Edge cases
+        assert_eq!(extract_resource_name(""), "");
+        assert_eq!(extract_resource_name("a/b/c"), "c"); // Multiple slashes: takes last part
+    }
+
+    // ============================================================
+    // Integration tests (require cluster)
+    // ============================================================
 
     /// RED: Test that Context::new() creates a namespace
     #[tokio::test]
@@ -3009,6 +3324,283 @@ mod tests {
 
         let dep: Deployment = ctx.get("scale-test").await.expect("Should get deployment");
         assert_eq!(dep.spec.as_ref().unwrap().replicas, Some(0));
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_restart_deployment() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a deployment
+        let deployment = Deployment {
+            metadata: kube::api::ObjectMeta {
+                name: Some("restart-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                replicas: Some(1),
+                selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(
+                        [("app".to_string(), "restart-test".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    metadata: Some(kube::api::ObjectMeta {
+                        labels: Some(
+                            [("app".to_string(), "restart-test".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "nginx".to_string(),
+                            image: Some("nginx:alpine".to_string()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&deployment)
+            .await
+            .expect("Should apply deployment");
+
+        // Restart the deployment
+        ctx.restart("deployment/restart-test")
+            .await
+            .expect("Should restart deployment");
+
+        // Verify the restart annotation was added to pod template
+        let dep: Deployment = ctx
+            .get("restart-test")
+            .await
+            .expect("Should get deployment");
+        let annotations = dep
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .annotations
+            .as_ref()
+            .expect("Should have annotations after restart");
+        assert!(
+            annotations.contains_key("kubectl.kubernetes.io/restartedAt"),
+            "Should have restartedAt annotation"
+        );
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_restart_only_supports_workloads() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Restart should not work on pods directly
+        let result = ctx.restart("pod/myapp").await;
+        assert!(result.is_err(), "restart should not work on pods");
+
+        // Restart should not work on services
+        let result = ctx.restart("service/myapp").await;
+        assert!(result.is_err(), "restart should not work on services");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_apply_cluster_scoped_resource() {
+        use k8s_openapi::api::rbac::v1::ClusterRole;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a cluster-scoped resource (ClusterRole)
+        // Use a unique name to avoid conflicts
+        let role_name = format!("seppo-test-role-{}", uuid::Uuid::new_v4());
+        let cluster_role = ClusterRole {
+            metadata: kube::api::ObjectMeta {
+                name: Some(role_name.clone()),
+                labels: Some(
+                    [("seppo.io/test".to_string(), "true".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            rules: Some(vec![]),
+            ..Default::default()
+        };
+
+        // Apply cluster-scoped resource
+        let applied = ctx
+            .apply_cluster(&cluster_role)
+            .await
+            .expect("Should apply cluster-scoped resource");
+
+        assert_eq!(applied.metadata.name, Some(role_name.clone()));
+
+        // Clean up the cluster role manually (not namespace-scoped)
+        let api: Api<ClusterRole> = Api::all(ctx.client.clone());
+        api.delete(&role_name, &DeleteParams::default())
+            .await
+            .expect("Should delete cluster role");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_get_cluster_scoped_resource() {
+        use k8s_openapi::api::rbac::v1::ClusterRole;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a cluster role first
+        let role_name = format!("seppo-test-role-{}", uuid::Uuid::new_v4());
+        let cluster_role = ClusterRole {
+            metadata: kube::api::ObjectMeta {
+                name: Some(role_name.clone()),
+                ..Default::default()
+            },
+            rules: Some(vec![]),
+            ..Default::default()
+        };
+
+        ctx.apply_cluster(&cluster_role)
+            .await
+            .expect("Should apply");
+
+        // Get it back using get_cluster
+        let fetched: ClusterRole = ctx
+            .get_cluster(&role_name)
+            .await
+            .expect("Should get cluster-scoped resource");
+
+        assert_eq!(fetched.metadata.name, Some(role_name.clone()));
+
+        // Clean up
+        let api: Api<ClusterRole> = Api::all(ctx.client.clone());
+        api.delete(&role_name, &DeleteParams::default())
+            .await
+            .expect("Should delete");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_delete_cluster_scoped_resource() {
+        use k8s_openapi::api::rbac::v1::ClusterRole;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a cluster role first
+        let role_name = format!("seppo-test-role-{}", uuid::Uuid::new_v4());
+        let cluster_role = ClusterRole {
+            metadata: kube::api::ObjectMeta {
+                name: Some(role_name.clone()),
+                ..Default::default()
+            },
+            rules: Some(vec![]),
+            ..Default::default()
+        };
+
+        ctx.apply_cluster(&cluster_role)
+            .await
+            .expect("Should apply");
+
+        // Delete using delete_cluster
+        ctx.delete_cluster::<ClusterRole>(&role_name)
+            .await
+            .expect("Should delete cluster-scoped resource");
+
+        // Verify it's gone
+        let api: Api<ClusterRole> = Api::all(ctx.client.clone());
+        let result = api.get(&role_name).await;
+        assert!(result.is_err(), "Resource should be deleted");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_logs_all_by_selector() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a deployment with 2 replicas
+        let deployment = Deployment {
+            metadata: kube::api::ObjectMeta {
+                name: Some("logs-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                replicas: Some(2),
+                selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(
+                        [("app".to_string(), "logs-test".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    metadata: Some(kube::api::ObjectMeta {
+                        labels: Some(
+                            [("app".to_string(), "logs-test".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "busybox".to_string(),
+                            image: Some("busybox:latest".to_string()),
+                            command: Some(vec![
+                                "sh".to_string(),
+                                "-c".to_string(),
+                                "echo 'hello from pod' && sleep 3600".to_string(),
+                            ]),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&deployment).await.expect("Should apply");
+        ctx.wait_ready("deployment/logs-test").await.expect("Should be ready");
+
+        // Get logs from all pods with label app=logs-test
+        let all_logs = ctx
+            .logs_all("app=logs-test")
+            .await
+            .expect("Should get logs from all pods");
+
+        // Should have logs from 2 pods
+        assert_eq!(all_logs.len(), 2, "Should have logs from 2 pods");
+
+        // Each pod should have the expected log message
+        for (_pod_name, logs) in &all_logs {
+            assert!(logs.contains("hello from pod"), "Each pod should have the log message");
+        }
 
         ctx.cleanup().await.expect("Should cleanup");
     }
