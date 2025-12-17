@@ -561,8 +561,6 @@ impl Context {
 
     /// Get logs from a pod in the test namespace
     pub async fn logs(&self, pod_name: &str) -> Result<String, ContextError> {
-        use k8s_openapi::api::core::v1::Pod;
-
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
 
         let logs = pods
@@ -571,6 +569,69 @@ impl Context {
             .map_err(|e| ContextError::LogsError(e.to_string()))?;
 
         Ok(logs)
+    }
+
+    /// Get logs from all pods matching a label selector
+    ///
+    /// Returns a HashMap of pod name to logs. Useful for debugging deployments
+    /// with multiple replicas or getting logs from all pods in a service.
+    ///
+    /// # Arguments
+    ///
+    /// * `selector` - Label selector string, e.g., "app=myapp" or "app=myapp,tier=backend"
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get logs from all pods with label app=myapp
+    /// let all_logs = ctx.logs_all("app=myapp").await?;
+    /// for (pod_name, logs) in &all_logs {
+    ///     println!("=== {} ===\n{}", pod_name, logs);
+    /// }
+    /// ```
+    pub async fn logs_all(&self, selector: &str) -> Result<HashMap<String, String>, ContextError> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        // List pods matching the selector
+        let list_params = ListParams::default().labels(selector);
+        let pod_list = pods
+            .list(&list_params)
+            .await
+            .map_err(|e| ContextError::ListError(e.to_string()))?;
+
+        let mut all_logs = HashMap::new();
+
+        for pod in pod_list.items {
+            let pod_name = pod.metadata.name.unwrap_or_default();
+            if pod_name.is_empty() {
+                continue;
+            }
+
+            // Try to get logs, but don't fail if a pod doesn't have logs yet
+            match pods.logs(&pod_name, &Default::default()).await {
+                Ok(logs) => {
+                    all_logs.insert(pod_name, logs);
+                }
+                Err(e) => {
+                    debug!(
+                        pod = %pod_name,
+                        error = %e,
+                        "Could not get logs from pod (may not be ready yet)"
+                    );
+                    // Insert empty string to indicate pod exists but no logs
+                    all_logs.insert(pod_name, String::new());
+                }
+            }
+        }
+
+        info!(
+            namespace = %self.namespace,
+            selector = %selector,
+            pod_count = %all_logs.len(),
+            "Collected logs from pods"
+        );
+
+        Ok(all_logs)
     }
 
     /// Wait for a resource to satisfy a condition
@@ -3520,6 +3581,75 @@ mod tests {
         let api: Api<ClusterRole> = Api::all(ctx.client.clone());
         let result = api.get(&role_name).await;
         assert!(result.is_err(), "Resource should be deleted");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_logs_all_by_selector() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a deployment with 2 replicas
+        let deployment = Deployment {
+            metadata: kube::api::ObjectMeta {
+                name: Some("logs-test".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                replicas: Some(2),
+                selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(
+                        [("app".to_string(), "logs-test".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    metadata: Some(kube::api::ObjectMeta {
+                        labels: Some(
+                            [("app".to_string(), "logs-test".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: "busybox".to_string(),
+                            image: Some("busybox:latest".to_string()),
+                            command: Some(vec![
+                                "sh".to_string(),
+                                "-c".to_string(),
+                                "echo 'hello from pod' && sleep 3600".to_string(),
+                            ]),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&deployment).await.expect("Should apply");
+        ctx.wait_ready("deployment/logs-test").await.expect("Should be ready");
+
+        // Get logs from all pods with label app=logs-test
+        let all_logs = ctx
+            .logs_all("app=logs-test")
+            .await
+            .expect("Should get logs from all pods");
+
+        // Should have logs from 2 pods
+        assert_eq!(all_logs.len(), 2, "Should have logs from 2 pods");
+
+        // Each pod should have the expected log message
+        for (_pod_name, logs) in &all_logs {
+            assert!(logs.contains("hello from pod"), "Each pod should have the log message");
+        }
 
         ctx.cleanup().await.expect("Should cleanup");
     }
