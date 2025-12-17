@@ -1304,103 +1304,54 @@ impl Context {
         let (kind, name) = parse_resource_ref(resource)?;
         let restarted_at = chrono::Utc::now().to_rfc3339();
 
+        // Helper macro to reduce duplication across resource types
+        macro_rules! restart_workload {
+            ($api:expr, $resource:expr, $kind_name:expr) => {{
+                let mut workload = $api
+                    .get(name)
+                    .await
+                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+
+                let spec = workload.spec.as_mut().ok_or_else(|| {
+                    ContextError::ApplyError(format!("{} '{}' has no spec", $kind_name, name))
+                })?;
+                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
+                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
+                annotations.insert(
+                    "kubectl.kubernetes.io/restartedAt".to_string(),
+                    restarted_at.clone(),
+                );
+
+                $api.replace(name, &PostParams::default(), &workload)
+                    .await
+                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
+
+                info!(
+                    namespace = %self.namespace,
+                    resource = %name,
+                    kind = %$kind_name,
+                    "Restarted workload (rolling update triggered)"
+                );
+
+                Ok(())
+            }};
+        }
+
         match kind {
             ResourceKind::Deployment => {
-                let deployments: Api<Deployment> =
+                let api: Api<Deployment> =
                     Api::namespaced(self.client.clone(), &self.namespace);
-
-                let mut dep = deployments
-                    .get(name)
-                    .await
-                    .map_err(|e| ContextError::GetError(e.to_string()))?;
-
-                // Get or create pod template annotations
-                let spec = dep.spec.as_mut().ok_or_else(|| {
-                    ContextError::ApplyError(format!("deployment '{}' has no spec", name))
-                })?;
-                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
-                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
-                annotations.insert(
-                    "kubectl.kubernetes.io/restartedAt".to_string(),
-                    restarted_at.clone(),
-                );
-
-                deployments
-                    .replace(name, &PostParams::default(), &dep)
-                    .await
-                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
-
-                info!(
-                    namespace = %self.namespace,
-                    deployment = %name,
-                    "Restarted deployment (rolling update triggered)"
-                );
-
-                Ok(())
+                restart_workload!(api, name, "deployment")
             }
             ResourceKind::StatefulSet => {
-                let statefulsets: Api<StatefulSet> =
+                let api: Api<StatefulSet> =
                     Api::namespaced(self.client.clone(), &self.namespace);
-
-                let mut sts = statefulsets
-                    .get(name)
-                    .await
-                    .map_err(|e| ContextError::GetError(e.to_string()))?;
-
-                let spec = sts.spec.as_mut().ok_or_else(|| {
-                    ContextError::ApplyError(format!("statefulset '{}' has no spec", name))
-                })?;
-                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
-                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
-                annotations.insert(
-                    "kubectl.kubernetes.io/restartedAt".to_string(),
-                    restarted_at.clone(),
-                );
-
-                statefulsets
-                    .replace(name, &PostParams::default(), &sts)
-                    .await
-                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
-
-                info!(
-                    namespace = %self.namespace,
-                    statefulset = %name,
-                    "Restarted statefulset (rolling update triggered)"
-                );
-
-                Ok(())
+                restart_workload!(api, name, "statefulset")
             }
             ResourceKind::DaemonSet => {
-                let daemonsets: Api<DaemonSet> =
+                let api: Api<DaemonSet> =
                     Api::namespaced(self.client.clone(), &self.namespace);
-
-                let mut ds = daemonsets
-                    .get(name)
-                    .await
-                    .map_err(|e| ContextError::GetError(e.to_string()))?;
-
-                let spec = ds.spec.as_mut().ok_or_else(|| {
-                    ContextError::ApplyError(format!("daemonset '{}' has no spec", name))
-                })?;
-                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
-                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
-                annotations.insert(
-                    "kubectl.kubernetes.io/restartedAt".to_string(),
-                    restarted_at.clone(),
-                );
-
-                daemonsets
-                    .replace(name, &PostParams::default(), &ds)
-                    .await
-                    .map_err(|e| ContextError::ApplyError(e.to_string()))?;
-
-                info!(
-                    namespace = %self.namespace,
-                    daemonset = %name,
-                    "Restarted daemonset (rolling update triggered)"
-                );
-
-                Ok(())
+                restart_workload!(api, name, "daemonset")
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
                 "restart only supports deployment, statefulset, and daemonset, got {:?}",
