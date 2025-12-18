@@ -12,6 +12,9 @@ use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
 };
 use k8s_openapi::api::core::v1::{Event, Namespace, PersistentVolumeClaim, Pod, Secret, Service};
+use k8s_openapi::api::networking::v1::{
+    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicySpec,
+};
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
@@ -49,6 +52,18 @@ pub enum ForwardTarget {
 pub fn extract_resource_name(reference: &str) -> &str {
     // If there's a slash, take everything after it
     reference.split('/').last().unwrap_or(reference)
+}
+
+/// Create a short hash from label selectors for naming NetworkPolicies
+fn label_hash(labels: &HashMap<String, String>) -> String {
+    let mut parts: Vec<String> = labels.iter().map(|(k, v)| format!("{}{}", k, v)).collect();
+    parts.sort(); // Ensure consistent ordering
+    let joined = parts.join("");
+    if joined.len() > 8 {
+        joined[..8].to_string()
+    } else {
+        joined
+    }
 }
 
 /// Parse a resource reference like "deployment/myapp" into (kind, name)
@@ -492,6 +507,119 @@ impl Context {
         );
 
         self.apply(&secret).await
+    }
+
+    /// Create a NetworkPolicy that denies all ingress/egress to pods matching the selector
+    ///
+    /// This effectively isolates the selected pods from all network traffic.
+    /// Useful for testing network segmentation or simulating network failures.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    ///
+    /// let mut selector = HashMap::new();
+    /// selector.insert("app".to_string(), "isolated".to_string());
+    ///
+    /// ctx.isolate(selector).await?;
+    /// // Pods with label app=isolated are now network-isolated
+    /// ```
+    pub async fn isolate(
+        &self,
+        selector: HashMap<String, String>,
+    ) -> Result<NetworkPolicy, ContextError> {
+        let name = format!("seppo-isolate-{}", label_hash(&selector));
+
+        let policy = NetworkPolicy {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            spec: Some(NetworkPolicySpec {
+                pod_selector: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(selector.into_iter().collect()),
+                    ..Default::default()
+                }),
+                policy_types: Some(vec!["Ingress".to_string(), "Egress".to_string()]),
+                // Empty ingress/egress means deny all
+                ingress: None,
+                egress: None,
+            }),
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            policy = %name,
+            "Creating isolate NetworkPolicy"
+        );
+
+        self.apply(&policy).await
+    }
+
+    /// Create a NetworkPolicy that allows ingress from source pods to target pods
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    ///
+    /// let mut target = HashMap::new();
+    /// target.insert("app".to_string(), "backend".to_string());
+    ///
+    /// let mut source = HashMap::new();
+    /// source.insert("app".to_string(), "frontend".to_string());
+    ///
+    /// ctx.allow_from(target, source).await?;
+    /// // Pods with app=backend can now receive traffic from pods with app=frontend
+    /// ```
+    pub async fn allow_from(
+        &self,
+        target: HashMap<String, String>,
+        source: HashMap<String, String>,
+    ) -> Result<NetworkPolicy, ContextError> {
+        let name = format!(
+            "seppo-allow-{}-from-{}",
+            label_hash(&target),
+            label_hash(&source)
+        );
+
+        let policy = NetworkPolicy {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            spec: Some(NetworkPolicySpec {
+                pod_selector: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(target.into_iter().collect()),
+                    ..Default::default()
+                }),
+                policy_types: Some(vec!["Ingress".to_string()]),
+                ingress: Some(vec![NetworkPolicyIngressRule {
+                    from: Some(vec![NetworkPolicyPeer {
+                        pod_selector: Some(
+                            k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                                match_labels: Some(source.into_iter().collect()),
+                                ..Default::default()
+                            },
+                        ),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }]),
+                egress: None,
+            }),
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            policy = %name,
+            "Creating allow-from NetworkPolicy"
+        );
+
+        self.apply(&policy).await
     }
 
     /// Patch a resource in the test namespace using JSON Merge Patch
@@ -2531,6 +2659,62 @@ mod tests {
         let _ = std::fs::remove_file(key_file);
 
         // Cleanup namespace
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that isolate() creates a deny-all NetworkPolicy
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_isolate() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        let mut selector = HashMap::new();
+        selector.insert("app".to_string(), "isolated".to_string());
+
+        let policy = ctx
+            .isolate(selector)
+            .await
+            .expect("Should create NetworkPolicy");
+
+        // Verify policy was created
+        assert!(policy.metadata.name.as_ref().unwrap().starts_with("seppo-isolate-"));
+
+        // Verify it's a deny-all (empty ingress/egress)
+        let spec = policy.spec.expect("Should have spec");
+        assert!(spec.ingress.is_none(), "Should have no ingress rules (deny all)");
+        assert!(spec.egress.is_none(), "Should have no egress rules (deny all)");
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that allow_from() creates an allow NetworkPolicy
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_allow_from() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        let mut target = HashMap::new();
+        target.insert("app".to_string(), "backend".to_string());
+
+        let mut source = HashMap::new();
+        source.insert("app".to_string(), "frontend".to_string());
+
+        let policy = ctx
+            .allow_from(target, source)
+            .await
+            .expect("Should create NetworkPolicy");
+
+        // Verify policy was created
+        assert!(policy.metadata.name.as_ref().unwrap().starts_with("seppo-allow-"));
+
+        // Verify it has ingress rules
+        let spec = policy.spec.expect("Should have spec");
+        assert!(spec.ingress.is_some(), "Should have ingress rules");
+        let ingress = spec.ingress.unwrap();
+        assert_eq!(ingress.len(), 1, "Should have one ingress rule");
+
+        // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
     }
 
