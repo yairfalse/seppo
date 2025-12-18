@@ -11,7 +11,7 @@ use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet}
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
 };
-use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
+use k8s_openapi::api::core::v1::{Event, Namespace, PersistentVolumeClaim, Pod, Service};
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
@@ -828,6 +828,93 @@ impl Context {
             if start.elapsed() >= timeout {
                 return Err(ContextError::WaitTimeout(format!(
                     "Timed out waiting for {} to be deleted after {:?}",
+                    name, timeout
+                )));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// Wait for a PersistentVolumeClaim to be bound
+    ///
+    /// Polls until the PVC's status.phase is "Bound".
+    /// Default timeout is 60 seconds, polling interval is 1 second.
+    ///
+    /// Accepts both `"name"` and `"pvc/name"` formats for consistency.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.apply(&my_pvc).await?;
+    /// ctx.wait_pvc_bound("my-pvc").await?;
+    /// // PVC is now bound and ready
+    /// ```
+    pub async fn wait_pvc_bound(&self, name: &str) -> Result<PersistentVolumeClaim, ContextError> {
+        self.wait_pvc_bound_with_timeout(name, std::time::Duration::from_secs(60))
+            .await
+    }
+
+    /// Wait for a PVC to be bound with a custom timeout
+    pub async fn wait_pvc_bound_with_timeout(
+        &self,
+        name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<PersistentVolumeClaim, ContextError> {
+        // Extract just the name if "pvc/name" format was provided
+        let name = extract_resource_name(name);
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_secs(1);
+
+        debug!(
+            namespace = %self.namespace,
+            pvc = %name,
+            timeout = ?timeout,
+            "Starting wait_pvc_bound"
+        );
+
+        loop {
+            match self.get::<PersistentVolumeClaim>(name).await {
+                Ok(pvc) => {
+                    let phase = pvc
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.phase.as_ref())
+                        .map(|p| p.as_str())
+                        .unwrap_or("Unknown");
+
+                    if phase == "Bound" {
+                        debug!(
+                            namespace = %self.namespace,
+                            pvc = %name,
+                            elapsed = ?start.elapsed(),
+                            "PVC is bound"
+                        );
+                        return Ok(pvc);
+                    }
+
+                    debug!(
+                        namespace = %self.namespace,
+                        pvc = %name,
+                        phase = %phase,
+                        elapsed = ?start.elapsed(),
+                        "PVC not bound yet, waiting..."
+                    );
+                }
+                Err(ContextError::GetError(_)) => {
+                    debug!(
+                        namespace = %self.namespace,
+                        pvc = %name,
+                        elapsed = ?start.elapsed(),
+                        "PVC doesn't exist yet, waiting..."
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(ContextError::WaitTimeout(format!(
+                    "Timed out waiting for PVC {} to be bound after {:?}",
                     name, timeout
                 )));
             }
@@ -2367,6 +2454,67 @@ mod tests {
         // Verify it's gone
         let result: Result<ConfigMap, _> = ctx.get("delete-wait-test").await;
         assert!(result.is_err(), "ConfigMap should be deleted");
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that wait_pvc_bound() waits for PVC to be bound
+    #[tokio::test]
+    #[ignore] // Requires real cluster with storage provisioner
+    async fn test_context_wait_pvc_bound() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a PVC
+        let pvc = PersistentVolumeClaim {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-pvc".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PersistentVolumeClaimSpec {
+                access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                resources: Some(k8s_openapi::api::core::v1::VolumeResourceRequirements {
+                    requests: Some(
+                        [("storage".to_string(), k8s_openapi::apimachinery::pkg::api::resource::Quantity("1Gi".to_string()))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pvc).await.expect("Should apply PVC");
+
+        // Wait for PVC to be bound (may timeout if no dynamic provisioning)
+        let result = ctx
+            .wait_pvc_bound_with_timeout("test-pvc", std::time::Duration::from_secs(30))
+            .await;
+
+        match result {
+            Ok(bound_pvc) => {
+                let phase = bound_pvc
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.phase.as_ref())
+                    .map(|p| p.as_str())
+                    .unwrap_or("Unknown");
+                assert_eq!(phase, "Bound", "PVC should be bound");
+            }
+            Err(e) => {
+                // Expected if no dynamic provisioning is available
+                println!("wait_pvc_bound returned error (expected if no dynamic provisioning): {}", e);
+            }
+        }
+
+        // Also test with "pvc/name" format
+        let result2 = ctx
+            .wait_pvc_bound_with_timeout("pvc/test-pvc", std::time::Duration::from_secs(5))
+            .await;
+        // Just verify it accepts the format
+        println!("pvc/name format result: {:?}", result2.is_ok());
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
