@@ -11,7 +11,7 @@ use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet}
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
 };
-use k8s_openapi::api::core::v1::{Event, Namespace, PersistentVolumeClaim, Pod, Service};
+use k8s_openapi::api::core::v1::{Event, Namespace, PersistentVolumeClaim, Pod, Secret, Service};
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
@@ -395,6 +395,103 @@ impl Context {
         );
 
         Ok(applied)
+    }
+
+    /// Create a Secret from file contents
+    ///
+    /// The files map keys become the secret data keys, values are file paths.
+    /// Files are read synchronously from the local filesystem.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    ///
+    /// let mut files = HashMap::new();
+    /// files.insert("ca.crt".to_string(), "/path/to/ca.crt".to_string());
+    /// files.insert("tls.crt".to_string(), "/path/to/tls.crt".to_string());
+    ///
+    /// ctx.secret_from_file("certs", files).await?;
+    /// ```
+    pub async fn secret_from_file(
+        &self,
+        name: &str,
+        files: HashMap<String, String>,
+    ) -> Result<Secret, ContextError> {
+        let mut data = std::collections::BTreeMap::new();
+
+        for (key, path) in files {
+            let content = std::fs::read(&path).map_err(|e| {
+                ContextError::ApplyError(format!("failed to read file {}: {}", path, e))
+            })?;
+            data.insert(key, k8s_openapi::ByteString(content));
+        }
+
+        let secret = Secret {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            secret = %name,
+            "Creating secret from files"
+        );
+
+        self.apply(&secret).await
+    }
+
+    /// Create a TLS Secret from certificate and key files
+    ///
+    /// Creates a Kubernetes TLS secret with the standard `tls.crt` and `tls.key` keys.
+    /// The secret type is set to `kubernetes.io/tls`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.secret_tls("my-tls", "/path/to/cert.pem", "/path/to/key.pem").await?;
+    /// ```
+    pub async fn secret_tls(
+        &self,
+        name: &str,
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<Secret, ContextError> {
+        let cert_data = std::fs::read(cert_path).map_err(|e| {
+            ContextError::ApplyError(format!("failed to read certificate {}: {}", cert_path, e))
+        })?;
+
+        let key_data = std::fs::read(key_path).map_err(|e| {
+            ContextError::ApplyError(format!("failed to read key {}: {}", key_path, e))
+        })?;
+
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), k8s_openapi::ByteString(cert_data));
+        data.insert("tls.key".to_string(), k8s_openapi::ByteString(key_data));
+
+        let secret = Secret {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            type_: Some("kubernetes.io/tls".to_string()),
+            data: Some(data),
+            ..Default::default()
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            secret = %name,
+            "Creating TLS secret"
+        );
+
+        self.apply(&secret).await
     }
 
     /// Patch a resource in the test namespace using JSON Merge Patch
@@ -2348,6 +2445,92 @@ mod tests {
         assert_eq!(data.get("key"), Some(&"value2".to_string()));
 
         // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that secret_from_file() creates a secret from files
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_secret_from_file() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create temp files
+        let temp_dir = std::env::temp_dir();
+        let file1 = temp_dir.join("seppo_test_config.txt");
+        let file2 = temp_dir.join("seppo_test_data.txt");
+
+        std::fs::write(&file1, "config-content").expect("Should write file1");
+        std::fs::write(&file2, "data-content").expect("Should write file2");
+
+        // Create secret from files
+        let mut files = HashMap::new();
+        files.insert("config".to_string(), file1.to_string_lossy().to_string());
+        files.insert("data".to_string(), file2.to_string_lossy().to_string());
+
+        let secret = ctx
+            .secret_from_file("file-secret", files)
+            .await
+            .expect("Should create secret");
+
+        // Verify secret was created
+        assert_eq!(secret.metadata.name.as_deref(), Some("file-secret"));
+        let data = secret.data.expect("Should have data");
+        assert_eq!(
+            data.get("config").map(|b| String::from_utf8_lossy(&b.0).to_string()),
+            Some("config-content".to_string())
+        );
+        assert_eq!(
+            data.get("data").map(|b| String::from_utf8_lossy(&b.0).to_string()),
+            Some("data-content".to_string())
+        );
+
+        // Cleanup temp files
+        let _ = std::fs::remove_file(file1);
+        let _ = std::fs::remove_file(file2);
+
+        // Cleanup namespace
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that secret_tls() creates a TLS secret
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_secret_tls() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create temp cert and key files (dummy content for testing)
+        let temp_dir = std::env::temp_dir();
+        let cert_file = temp_dir.join("seppo_test_cert.pem");
+        let key_file = temp_dir.join("seppo_test_key.pem");
+
+        std::fs::write(&cert_file, "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----")
+            .expect("Should write cert");
+        std::fs::write(&key_file, "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----")
+            .expect("Should write key");
+
+        // Create TLS secret
+        let secret = ctx
+            .secret_tls(
+                "tls-secret",
+                &cert_file.to_string_lossy(),
+                &key_file.to_string_lossy(),
+            )
+            .await
+            .expect("Should create TLS secret");
+
+        // Verify secret was created with TLS type
+        assert_eq!(secret.metadata.name.as_deref(), Some("tls-secret"));
+        assert_eq!(secret.type_.as_deref(), Some("kubernetes.io/tls"));
+
+        let data = secret.data.expect("Should have data");
+        assert!(data.contains_key("tls.crt"), "Should have tls.crt");
+        assert!(data.contains_key("tls.key"), "Should have tls.key");
+
+        // Cleanup temp files
+        let _ = std::fs::remove_file(cert_file);
+        let _ = std::fs::remove_file(key_file);
+
+        // Cleanup namespace
         ctx.cleanup().await.expect("Should cleanup");
     }
 
