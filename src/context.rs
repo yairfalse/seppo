@@ -8,6 +8,9 @@ use crate::portforward::{PortForward, PortForwardError};
 use crate::stack::{Stack, StackError};
 use futures::Stream;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::authorization::v1::{
+    ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
+};
 use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::watcher::{self, Event as WatchEvent};
@@ -1358,6 +1361,63 @@ impl Context {
                 kind
             ))),
         }
+    }
+
+    /// Check if the current user has permission to perform an action
+    ///
+    /// Uses the Kubernetes SelfSubjectAccessReview API to check RBAC permissions.
+    /// Useful for tests that need to verify RBAC configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `verb` - The action to check: "get", "list", "watch", "create", "update", "delete", etc.
+    /// * `resource` - The resource type: "pods", "deployments", "secrets", etc.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Check if we can create pods
+    /// let can_create_pods = ctx.can_i("create", "pods").await?;
+    /// assert!(can_create_pods, "Should be able to create pods");
+    ///
+    /// // Check if we can delete secrets
+    /// let can_delete_secrets = ctx.can_i("delete", "secrets").await?;
+    /// ```
+    pub async fn can_i(&self, verb: &str, resource: &str) -> Result<bool, ContextError> {
+        let review = SelfSubjectAccessReview {
+            metadata: Default::default(),
+            spec: SelfSubjectAccessReviewSpec {
+                resource_attributes: Some(ResourceAttributes {
+                    namespace: Some(self.namespace.clone()),
+                    verb: Some(verb.to_string()),
+                    resource: Some(resource.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            status: None,
+        };
+
+        let api: Api<SelfSubjectAccessReview> = Api::all(self.client.clone());
+        let result = api
+            .create(&PostParams::default(), &review)
+            .await
+            .map_err(|e| ContextError::GetError(format!("RBAC check failed: {}", e)))?;
+
+        let allowed = result
+            .status
+            .map(|s| s.allowed)
+            .unwrap_or(false);
+
+        debug!(
+            verb = %verb,
+            resource = %resource,
+            namespace = %self.namespace,
+            allowed = %allowed,
+            "RBAC permission check"
+        );
+
+        Ok(allowed)
     }
 
     /// Get events from the test namespace
