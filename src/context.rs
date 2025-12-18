@@ -1810,6 +1810,62 @@ impl Context {
         Ok(())
     }
 
+    /// Retry an operation with exponential backoff
+    ///
+    /// Useful for operations that may transiently fail, like waiting for
+    /// a resource to be fully ready or handling API rate limits.
+    ///
+    /// Starts with 100ms backoff, doubling each time up to 5 seconds max.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Retry an HTTP request up to 5 times
+    /// ctx.retry(5, || async {
+    ///     let resp = pf.get("/health").await?;
+    ///     if resp.contains("ok") { Ok(()) } else { Err("not ready".into()) }
+    /// }).await?;
+    /// ```
+    pub async fn retry<F, Fut, E>(&self, max_attempts: usize, mut f: F) -> Result<(), E>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+        E: std::fmt::Display,
+    {
+        let mut backoff = std::time::Duration::from_millis(100);
+        let max_backoff = std::time::Duration::from_secs(5);
+
+        for attempt in 0..max_attempts {
+            match f().await {
+                Ok(()) => {
+                    debug!(attempt = attempt + 1, "Retry succeeded");
+                    return Ok(());
+                }
+                Err(e) => {
+                    if attempt + 1 >= max_attempts {
+                        warn!(
+                            attempt = attempt + 1,
+                            max_attempts = max_attempts,
+                            error = %e,
+                            "Retry exhausted all attempts"
+                        );
+                        return Err(e);
+                    }
+                    debug!(
+                        attempt = attempt + 1,
+                        max_attempts = max_attempts,
+                        backoff = ?backoff,
+                        error = %e,
+                        "Retry attempt failed, backing off"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = std::cmp::min(backoff * 2, max_backoff);
+                }
+            }
+        }
+        unreachable!()
+    }
+
     /// Create a pod assertion builder
     ///
     /// # Example
@@ -1882,6 +1938,73 @@ mod tests {
         // Edge cases
         assert_eq!(extract_resource_name(""), "");
         assert_eq!(extract_resource_name("a/b/c"), "c"); // Multiple slashes: takes last part
+    }
+
+    #[tokio::test]
+    async fn test_retry_succeeds_on_transient_failure() {
+        let ctx = Context {
+            client: kube::Client::try_default().await.unwrap_or_else(|_| {
+                // Create a dummy client for testing - this test doesn't need a real cluster
+                panic!("This test requires a kubeconfig but doesn't connect to cluster")
+            }),
+            namespace: "test".to_string(),
+        };
+
+        // Skip if no kubeconfig available
+        if kube::Client::try_default().await.is_err() {
+            return;
+        }
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let result: Result<(), &str> = ctx
+            .retry(3, || {
+                let counter = counter_clone.clone();
+                async move {
+                    let count = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if count < 2 {
+                        Err("not ready yet")
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_fails_after_max_attempts() {
+        let ctx = Context {
+            client: kube::Client::try_default().await.unwrap_or_else(|_| {
+                panic!("This test requires a kubeconfig but doesn't connect to cluster")
+            }),
+            namespace: "test".to_string(),
+        };
+
+        // Skip if no kubeconfig available
+        if kube::Client::try_default().await.is_err() {
+            return;
+        }
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let result: Result<(), &str> = ctx
+            .retry(3, || {
+                let counter = counter_clone.clone();
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("always fails")
+                }
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     // ============================================================
