@@ -6,13 +6,13 @@
 use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
 use crate::stack::{Stack, StackError};
-use futures::Stream;
+use futures::{AsyncBufReadExt, Stream};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
 };
 use k8s_openapi::api::core::v1::{Event, Namespace, PersistentVolumeClaim, Pod, Service};
-use kube::api::{Api, AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
 use std::collections::HashMap;
@@ -572,6 +572,46 @@ impl Context {
             .map_err(|e| ContextError::LogsError(e.to_string()))?;
 
         Ok(logs)
+    }
+
+    /// Stream logs from a pod in real-time
+    ///
+    /// Returns a stream of log lines that can be iterated with `try_next().await`.
+    /// Uses `follow: true` for continuous streaming like `kubectl logs -f`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use futures::TryStreamExt;
+    ///
+    /// let mut stream = ctx.logs_stream("my-pod").await?;
+    /// while let Some(line) = stream.try_next().await? {
+    ///     println!("{}", line);
+    /// }
+    /// ```
+    pub async fn logs_stream(
+        &self,
+        pod_name: &str,
+    ) -> Result<impl Stream<Item = Result<String, std::io::Error>> + '_, ContextError> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let params = LogParams {
+            follow: true,
+            ..Default::default()
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            pod = %pod_name,
+            "Starting log stream"
+        );
+
+        let log_stream = pods
+            .log_stream(pod_name, &params)
+            .await
+            .map_err(|e| ContextError::LogsError(e.to_string()))?;
+
+        Ok(log_stream.lines())
     }
 
     /// Get logs from all pods matching a label selector
@@ -2610,6 +2650,89 @@ mod tests {
             logs.contains("hello from seppo"),
             "Logs should contain our message, got: {}",
             logs
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that logs_stream() streams pod logs in real-time
+    #[tokio::test]
+    #[ignore] // Requires real cluster with a running pod
+    async fn test_context_logs_stream() {
+        use futures::TryStreamExt;
+        use k8s_openapi::api::core::v1::Pod;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a pod that outputs logs over time
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("stream-test-pod".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "test".to_string(),
+                    image: Some("busybox:latest".to_string()),
+                    command: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "for i in 1 2 3 4 5; do echo \"log line $i\"; sleep 1; done".to_string(),
+                    ]),
+                    ..Default::default()
+                }],
+                restart_policy: Some("Never".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait for pod to be running
+        ctx.wait_for::<Pod, _>("stream-test-pod", |p| {
+            p.status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .is_some_and(|phase| phase == "Running")
+        })
+        .await
+        .expect("Pod should be running");
+
+        // Stream logs and collect some lines
+        let mut stream = ctx
+            .logs_stream("stream-test-pod")
+            .await
+            .expect("Should get log stream");
+
+        let mut lines = Vec::new();
+        // Collect a few lines with a timeout
+        let collect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async {
+                while let Some(line) = stream.try_next().await? {
+                    lines.push(line);
+                    if lines.len() >= 3 {
+                        break;
+                    }
+                }
+                Ok::<_, std::io::Error>(())
+            },
+        )
+        .await;
+
+        assert!(
+            collect_result.is_ok(),
+            "Should collect logs within timeout"
+        );
+        assert!(
+            lines.len() >= 1,
+            "Should have received at least one log line"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("log line")),
+            "Logs should contain our messages"
         );
 
         // Cleanup
