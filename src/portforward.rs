@@ -130,6 +130,20 @@ impl PortForward {
         self.local_addr
     }
 
+    /// Get a URL for the given path through the port forward
+    ///
+    /// Useful when you need to pass a URL to another library or tool.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let health_url = pf.url("/health");
+    /// // Returns something like "http://127.0.0.1:54321/health"
+    /// ```
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.local_addr, path)
+    }
+
     /// Make an HTTP GET request through the port forward
     ///
     /// Returns the response body as a UTF-8 string. Binary responses
