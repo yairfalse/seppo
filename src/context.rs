@@ -22,6 +22,7 @@ use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, P
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
 use std::collections::HashMap;
+use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
@@ -439,7 +440,7 @@ impl Context {
         let mut data = std::collections::BTreeMap::new();
 
         for (key, path) in files {
-            let content = tokio::fs::read(&path).await.map_err(|e| {
+            let content = fs::read(&path).await.map_err(|e| {
                 ContextError::ApplyError(format!("failed to read file {}: {}", path, e))
             })?;
             data.insert(key, k8s_openapi::ByteString(content));
@@ -480,11 +481,11 @@ impl Context {
         cert_path: &str,
         key_path: &str,
     ) -> Result<Secret, ContextError> {
-        let cert_data = std::fs::read(cert_path).map_err(|e| {
+        let cert_data = fs::read(cert_path).await.map_err(|e| {
             ContextError::ApplyError(format!("failed to read certificate {}: {}", cert_path, e))
         })?;
 
-        let key_data = std::fs::read(key_path).map_err(|e| {
+        let key_data = fs::read(key_path).await.map_err(|e| {
             ContextError::ApplyError(format!("failed to read key {}: {}", key_path, e))
         })?;
 
@@ -851,6 +852,12 @@ impl Context {
     ///
     /// Returns a stream of log lines that can be iterated with `try_next().await`.
     /// Uses `follow: true` for continuous streaming like `kubectl logs -f`.
+    ///
+    /// # Lifetime
+    ///
+    /// The returned stream holds an internal reference to the Kubernetes API
+    /// connection. The stream must be dropped before the `Context` can be dropped.
+    /// This is enforced at compile-time via the `'_` lifetime on the return type.
     ///
     /// # Example
     ///
@@ -2277,6 +2284,10 @@ impl Context {
     ///
     /// Starts with 100ms backoff, doubling each time up to 5 seconds max.
     ///
+    /// # Panics
+    ///
+    /// Panics if `max_attempts` is 0. Use at least 1 attempt.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -2292,6 +2303,11 @@ impl Context {
         Fut: std::future::Future<Output = Result<(), E>>,
         E: std::fmt::Display,
     {
+        assert!(
+            max_attempts > 0,
+            "retry() requires at least 1 attempt, got max_attempts=0"
+        );
+
         let mut backoff = std::time::Duration::from_millis(100);
         let max_backoff = std::time::Duration::from_secs(5);
 
@@ -2394,6 +2410,22 @@ impl Context {
 }
 
 /// Fluent builder for testing Ingress resources
+///
+/// Uses a short-circuit pattern: once an error is recorded via any assertion
+/// method (like `expect_backend()` or `expect_tls()`), subsequent methods
+/// skip their checks and preserve the first error. Use `error()` to get the
+/// first error or `must()` to panic with it.
+///
+/// # Example
+///
+/// ```ignore
+/// ctx.test_ingress("my-ingress")
+///     .host("example.com")
+///     .path("/api")
+///     .expect_backend("svc/api", 8080).await
+///     .expect_tls("my-tls-secret").await
+///     .must(); // Panics if any assertion failed
+/// ```
 pub struct IngressTest {
     client: Client,
     namespace: String,
@@ -2804,19 +2836,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_succeeds_on_transient_failure() {
-        // Attempt to create a real client; skip the test if no kubeconfig is available
+        // Skip if no kubeconfig available
         let client = match kube::Client::try_default().await {
             Ok(client) => client,
-            Err(_) => {
-                // No kubeconfig available, skip this test
-                return;
-            }
+            Err(_) => return,
         };
-
         let ctx = Context {
             client,
             namespace: "test".to_string(),
         };
+
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
@@ -2840,17 +2869,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_fails_after_max_attempts() {
+        // Skip if no kubeconfig available
+        let client = match kube::Client::try_default().await {
+            Ok(client) => client,
+            Err(_) => return,
+        };
         let ctx = Context {
-            client: kube::Client::try_default().await.unwrap_or_else(|_| {
-                panic!("This test requires a kubeconfig but doesn't connect to cluster")
-            }),
+            client,
             namespace: "test".to_string(),
         };
-
-        // Skip if no kubeconfig available
-        if kube::Client::try_default().await.is_err() {
-            return;
-        }
 
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter_clone = counter.clone();
