@@ -439,7 +439,7 @@ impl Context {
         let mut data = std::collections::BTreeMap::new();
 
         for (key, path) in files {
-            let content = std::fs::read(&path).map_err(|e| {
+            let content = tokio::fs::read(&path).await.map_err(|e| {
                 ContextError::ApplyError(format!("failed to read file {}: {}", path, e))
             })?;
             data.insert(key, k8s_openapi::ByteString(content));
