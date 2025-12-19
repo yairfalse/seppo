@@ -141,7 +141,14 @@ impl PortForward {
     /// // Returns something like "http://127.0.0.1:54321/health"
     /// ```
     pub fn url(&self, path: &str) -> String {
-        format!("http://{}{}", self.local_addr, path)
+        let normalized_path = if path.is_empty() {
+            "/".to_string()
+        } else if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        };
+        format!("http://{}{}", self.local_addr, normalized_path)
     }
 
     /// Make an HTTP GET request through the port forward
