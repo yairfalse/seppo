@@ -11,7 +11,10 @@ use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet}
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
 };
-use k8s_openapi::api::core::v1::{Event, Namespace, PersistentVolumeClaim, Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    Event, Namespace, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
+};
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::api::networking::v1::{
     Ingress, NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicySpec,
 };
@@ -507,6 +510,51 @@ impl Context {
         );
 
         self.apply(&secret).await
+    }
+
+    /// Apply an RBACBundle (ServiceAccount, Role, RoleBinding)
+    ///
+    /// This is a convenience method for applying all three RBAC resources
+    /// created by the RBACBuilder.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let rbac = RBACBuilder::service_account("my-sa")
+    ///     .can_get(&["pods", "services"])
+    ///     .can_list(&["deployments"])
+    ///     .build();
+    ///
+    /// ctx.apply_rbac(&rbac).await?;
+    /// ```
+    pub async fn apply_rbac(&self, bundle: &RBACBundle) -> Result<(), ContextError> {
+        debug!(
+            namespace = %self.namespace,
+            service_account = ?bundle.service_account.metadata.name,
+            "Applying RBAC bundle"
+        );
+
+        // Apply ServiceAccount
+        let mut sa = bundle.service_account.clone();
+        sa.metadata.namespace = Some(self.namespace.clone());
+        self.apply(&sa).await?;
+
+        // Apply Role
+        let mut role = bundle.role.clone();
+        role.metadata.namespace = Some(self.namespace.clone());
+        self.apply(&role).await?;
+
+        // Apply RoleBinding with namespace set on subject
+        let mut rb = bundle.role_binding.clone();
+        rb.metadata.namespace = Some(self.namespace.clone());
+        if let Some(ref mut subjects) = rb.subjects {
+            for subject in subjects.iter_mut() {
+                subject.namespace = Some(self.namespace.clone());
+            }
+        }
+        self.apply(&rb).await?;
+
+        Ok(())
     }
 
     /// Create a NetworkPolicy that denies all ingress/egress to pods matching the selector
@@ -2528,6 +2576,204 @@ impl IngressTest {
         if let Some(err) = self.err {
             panic!("IngressTest failed: {}", err);
         }
+    }
+}
+
+/// Bundle containing ServiceAccount, Role, and RoleBinding for RBAC setup
+pub struct RBACBundle {
+    /// The ServiceAccount
+    pub service_account: ServiceAccount,
+    /// The Role defining permissions
+    pub role: Role,
+    /// The RoleBinding connecting ServiceAccount to Role
+    pub role_binding: RoleBinding,
+}
+
+/// Fluent builder for creating RBAC resources
+///
+/// # Example
+///
+/// ```ignore
+/// let rbac = RBACBuilder::service_account("my-sa")
+///     .with_role("my-role")
+///     .can_get(&["pods", "services"])
+///     .can_list(&["deployments"])
+///     .can_all(&["secrets"])
+///     .build();
+///
+/// ctx.apply_rbac(&rbac).await?;
+/// ```
+pub struct RBACBuilder {
+    name: String,
+    role_name: String,
+    rules: Vec<PolicyRule>,
+}
+
+impl RBACBuilder {
+    /// Create a new RBACBuilder with the given ServiceAccount name
+    pub fn service_account(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            role_name: format!("{}-role", name),
+            rules: Vec::new(),
+        }
+    }
+
+    /// Set a custom role name
+    pub fn with_role(mut self, role_name: &str) -> Self {
+        self.role_name = role_name.to_string();
+        self
+    }
+
+    /// Add a policy rule with the correct API group for each resource
+    fn add_rule(&mut self, verbs: &[&str], resources: &[&str]) {
+        // Group resources by their API group
+        let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
+        for res in resources {
+            let group = api_group_for_resource(res);
+            by_group
+                .entry(group)
+                .or_default()
+                .push(res.to_string());
+        }
+
+        // Create separate rules for each API group
+        for (group, group_resources) in by_group {
+            self.rules.push(PolicyRule {
+                api_groups: Some(vec![group]),
+                resources: Some(group_resources),
+                verbs: verbs.iter().map(|v| v.to_string()).collect(),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Add get permission for the specified resources
+    pub fn can_get(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["get"], resources);
+        self
+    }
+
+    /// Add list permission for the specified resources
+    pub fn can_list(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["list"], resources);
+        self
+    }
+
+    /// Add watch permission for the specified resources
+    pub fn can_watch(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["watch"], resources);
+        self
+    }
+
+    /// Add create permission for the specified resources
+    pub fn can_create(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["create"], resources);
+        self
+    }
+
+    /// Add update permission for the specified resources
+    pub fn can_update(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["update"], resources);
+        self
+    }
+
+    /// Add delete permission for the specified resources
+    pub fn can_delete(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["delete"], resources);
+        self
+    }
+
+    /// Add all permissions (get, list, watch, create, update, delete) for resources
+    pub fn can_all(mut self, resources: &[&str]) -> Self {
+        self.add_rule(
+            &["get", "list", "watch", "create", "update", "delete"],
+            resources,
+        );
+        self
+    }
+
+    /// Add custom verbs for the specified resources
+    pub fn can(mut self, verbs: &[&str], resources: &[&str]) -> Self {
+        self.add_rule(verbs, resources);
+        self
+    }
+
+    /// Add a rule with explicit API group for custom resources (CRDs)
+    pub fn for_api_group(mut self, api_group: &str, verbs: &[&str], resources: &[&str]) -> Self {
+        self.rules.push(PolicyRule {
+            api_groups: Some(vec![api_group.to_string()]),
+            resources: Some(resources.iter().map(|r| r.to_string()).collect()),
+            verbs: verbs.iter().map(|v| v.to_string()).collect(),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Build the RBACBundle with ServiceAccount, Role, and RoleBinding
+    pub fn build(self) -> RBACBundle {
+        RBACBundle {
+            service_account: ServiceAccount {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(self.name.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            role: Role {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(self.role_name.clone()),
+                    ..Default::default()
+                },
+                rules: Some(self.rules),
+            },
+            role_binding: RoleBinding {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(format!("{}-binding", self.name)),
+                    ..Default::default()
+                },
+                subjects: Some(vec![Subject {
+                    kind: "ServiceAccount".to_string(),
+                    name: self.name.clone(),
+                    namespace: None,
+                    api_group: None,
+                }]),
+                role_ref: RoleRef {
+                    api_group: "rbac.authorization.k8s.io".to_string(),
+                    kind: "Role".to_string(),
+                    name: self.role_name,
+                },
+            },
+        }
+    }
+}
+
+/// Returns the correct API group for a resource
+fn api_group_for_resource(resource: &str) -> String {
+    match resource {
+        // Core API group ("")
+        "pods" | "services" | "configmaps" | "secrets" | "persistentvolumeclaims"
+        | "serviceaccounts" | "namespaces" | "nodes" | "events" | "endpoints"
+        | "persistentvolumes" | "replicationcontrollers" | "resourcequotas" | "limitranges" => {
+            String::new()
+        }
+        // apps group
+        "deployments" | "statefulsets" | "daemonsets" | "replicasets"
+        | "controllerrevisions" => "apps".to_string(),
+        // batch group
+        "jobs" | "cronjobs" => "batch".to_string(),
+        // networking.k8s.io group
+        "ingresses" | "networkpolicies" | "ingressclasses" => "networking.k8s.io".to_string(),
+        // rbac.authorization.k8s.io group
+        "roles" | "rolebindings" | "clusterroles" | "clusterrolebindings" => {
+            "rbac.authorization.k8s.io".to_string()
+        }
+        // autoscaling group
+        "horizontalpodautoscalers" => "autoscaling".to_string(),
+        // policy group
+        "poddisruptionbudgets" => "policy".to_string(),
+        // Default to core for unknown resources
+        _ => String::new(),
     }
 }
 
