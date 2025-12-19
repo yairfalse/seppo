@@ -2804,19 +2804,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_succeeds_on_transient_failure() {
-        let ctx = Context {
-            client: kube::Client::try_default().await.unwrap_or_else(|_| {
-                // Create a dummy client for testing - this test doesn't need a real cluster
-                panic!("This test requires a kubeconfig but doesn't connect to cluster")
-            }),
-            namespace: "test".to_string(),
+        // Attempt to create a real client; skip the test if no kubeconfig is available
+        let client = match kube::Client::try_default().await {
+            Ok(client) => client,
+            Err(_) => {
+                // No kubeconfig available, skip this test
+                return;
+            }
         };
 
-        // Skip if no kubeconfig available
-        if kube::Client::try_default().await.is_err() {
-            return;
-        }
-
+        let ctx = Context {
+            client,
+            namespace: "test".to_string(),
+        };
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
