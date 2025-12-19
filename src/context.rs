@@ -2495,15 +2495,32 @@ impl IngressTest {
                     }
 
                     if let Some(http) = rule.http {
+                        // Path matching semantics:
+                        // - If self.path is None, match any ingress path.
+                        // - If the ingress path is empty, treat it as matching all request paths.
+                        // - Otherwise, require that the ingress path is a path-segment prefix of
+                        //   the requested path, e.g. "/api" matches "/api", "/api/", "/api/v1"
+                        //   but does NOT match "/apiv2".
+                        let path_prefix_matches = |test_path: &str, ingress_path: &str| {
+                            if ingress_path.is_empty() {
+                                // Empty ingress path behaves as a catch-all.
+                                true
+                            } else if test_path == ingress_path {
+                                true
+                            } else if let Some(rest) = test_path.strip_prefix(ingress_path) {
+                                rest.starts_with('/')
+                            } else {
+                                false
+                            }
+                        };
+
                         for p in http.paths {
-                            // Check path match (None means match any)
+                            // Check path match (None in test means match any)
                             let ingress_path = p.path.as_deref().unwrap_or("");
-                            let path_matches = self.path.is_none()
-                                || self.path.as_deref() == Some(ingress_path)
-                                || self
-                                    .path
-                                    .as_ref()
-                                    .is_some_and(|test_path| test_path.starts_with(ingress_path));
+                            let path_matches = self
+                                .path
+                                .as_deref()
+                                .map_or(true, |test_path| path_prefix_matches(test_path, ingress_path));
 
                             if path_matches {
                                 if let Some(service) = p.backend.service {
