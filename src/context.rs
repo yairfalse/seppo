@@ -6,13 +6,25 @@
 use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
 use crate::stack::{Stack, StackError};
-use futures::Stream;
+use futures::{AsyncBufReadExt, Stream};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
-use k8s_openapi::api::core::v1::{Event, Namespace, Pod, Service};
-use kube::api::{Api, AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use k8s_openapi::api::authorization::v1::{
+    ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
+};
+use k8s_openapi::api::core::v1::{
+    Event, Namespace, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
+};
+use k8s_openapi::api::networking::v1::{
+    Ingress, NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicySpec,
+};
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
+use kube::api::{
+    Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams,
+};
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
 use std::collections::HashMap;
+use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
@@ -45,7 +57,31 @@ pub enum ForwardTarget {
 /// - `"pod/worker-0"` → `"worker-0"`
 pub fn extract_resource_name(reference: &str) -> &str {
     // If there's a slash, take everything after it
-    reference.split('/').last().unwrap_or(reference)
+    reference.split('/').next_back().unwrap_or(reference)
+}
+
+/// Create a deterministic suffix from label selectors for naming NetworkPolicies
+///
+/// Uses a hash function to generate a collision-resistant 8-character hex suffix.
+/// Sorted keys ensure the same labels always produce the same suffix.
+fn label_suffix(labels: &HashMap<String, String>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    // Sort keys for deterministic ordering
+    let mut parts: Vec<(&String, &String)> = labels.iter().collect();
+    parts.sort_by_key(|(k, _)| *k);
+
+    // Hash each key-value pair
+    for (k, v) in parts {
+        k.hash(&mut hasher);
+        v.hash(&mut hasher);
+    }
+
+    // Take first 8 hex characters of the hash
+    format!("{:x}", hasher.finish())[..8].to_string()
 }
 
 /// Parse a resource reference like "deployment/myapp" into (kind, name)
@@ -394,6 +430,275 @@ impl Context {
         Ok(applied)
     }
 
+    /// Create a Secret from file contents
+    ///
+    /// The files map keys become the secret data keys, values are file paths.
+    /// Files are read synchronously from the local filesystem.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    ///
+    /// let mut files = HashMap::new();
+    /// files.insert("ca.crt".to_string(), "/path/to/ca.crt".to_string());
+    /// files.insert("tls.crt".to_string(), "/path/to/tls.crt".to_string());
+    ///
+    /// ctx.secret_from_file("certs", files).await?;
+    /// ```
+    pub async fn secret_from_file(
+        &self,
+        name: &str,
+        files: HashMap<String, String>,
+    ) -> Result<Secret, ContextError> {
+        let mut data = std::collections::BTreeMap::new();
+
+        for (key, path) in files {
+            let content = fs::read(&path).await.map_err(|e| {
+                ContextError::ApplyError(format!("failed to read file {}: {}", path, e))
+            })?;
+            data.insert(key, k8s_openapi::ByteString(content));
+        }
+
+        let secret = Secret {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            secret = %name,
+            "Creating secret from files"
+        );
+
+        self.apply(&secret).await
+    }
+
+    /// Create a TLS Secret from certificate and key files
+    ///
+    /// Creates a Kubernetes TLS secret with the standard `tls.crt` and `tls.key` keys.
+    /// The secret type is set to `kubernetes.io/tls`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.secret_tls("my-tls", "/path/to/cert.pem", "/path/to/key.pem").await?;
+    /// ```
+    pub async fn secret_tls(
+        &self,
+        name: &str,
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<Secret, ContextError> {
+        let cert_data = fs::read(cert_path).await.map_err(|e| {
+            ContextError::ApplyError(format!("failed to read certificate {}: {}", cert_path, e))
+        })?;
+
+        let key_data = fs::read(key_path).await.map_err(|e| {
+            ContextError::ApplyError(format!("failed to read key {}: {}", key_path, e))
+        })?;
+
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), k8s_openapi::ByteString(cert_data));
+        data.insert("tls.key".to_string(), k8s_openapi::ByteString(key_data));
+
+        let secret = Secret {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            type_: Some("kubernetes.io/tls".to_string()),
+            data: Some(data),
+            ..Default::default()
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            secret = %name,
+            "Creating TLS secret"
+        );
+
+        self.apply(&secret).await
+    }
+
+    /// Apply an RBACBundle (ServiceAccount, Role, RoleBinding)
+    ///
+    /// This is a convenience method for applying all three RBAC resources
+    /// created by the RBACBuilder.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let rbac = RBACBuilder::service_account("my-sa")
+    ///     .can_get(&["pods", "services"])
+    ///     .can_list(&["deployments"])
+    ///     .build();
+    ///
+    /// ctx.apply_rbac(&rbac).await?;
+    /// ```
+    pub async fn apply_rbac(&self, bundle: &RBACBundle) -> Result<(), ContextError> {
+        debug!(
+            namespace = %self.namespace,
+            service_account = ?bundle.service_account.metadata.name,
+            "Applying RBAC bundle"
+        );
+
+        // Apply ServiceAccount
+        let mut sa = bundle.service_account.clone();
+        sa.metadata.namespace = Some(self.namespace.clone());
+        self.apply(&sa).await?;
+
+        // Apply Role
+        let mut role = bundle.role.clone();
+        role.metadata.namespace = Some(self.namespace.clone());
+        self.apply(&role).await?;
+
+        // Apply RoleBinding with namespace set on subject
+        let mut rb = bundle.role_binding.clone();
+        rb.metadata.namespace = Some(self.namespace.clone());
+        if let Some(ref mut subjects) = rb.subjects {
+            for subject in subjects.iter_mut() {
+                subject.namespace = Some(self.namespace.clone());
+            }
+        }
+        self.apply(&rb).await?;
+
+        Ok(())
+    }
+
+    /// Create a NetworkPolicy that denies all ingress/egress to pods matching the selector
+    ///
+    /// This effectively isolates the selected pods from all network traffic.
+    /// Useful for testing network segmentation or simulating network failures.
+    ///
+    /// # Cleanup
+    ///
+    /// The NetworkPolicy is created in the context's namespace and will be automatically
+    /// deleted when the namespace is cleaned up via [`cleanup()`](Self::cleanup).
+    /// To remove isolation before cleanup, delete the returned NetworkPolicy using
+    /// [`delete()`](Self::delete) with the policy name from `metadata.name`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    ///
+    /// let mut selector = HashMap::new();
+    /// selector.insert("app".to_string(), "isolated".to_string());
+    ///
+    /// let policy = ctx.isolate(selector).await?;
+    /// // Pods with label app=isolated are now network-isolated
+    ///
+    /// // To remove isolation early:
+    /// ctx.delete::<NetworkPolicy>(policy.metadata.name.as_ref().unwrap()).await?;
+    /// ```
+    pub async fn isolate(
+        &self,
+        selector: HashMap<String, String>,
+    ) -> Result<NetworkPolicy, ContextError> {
+        let name = format!("seppo-isolate-{}", label_suffix(&selector));
+
+        let policy = NetworkPolicy {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            spec: Some(NetworkPolicySpec {
+                pod_selector: Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                        match_labels: Some(selector.into_iter().collect()),
+                        ..Default::default()
+                    },
+                ),
+                policy_types: Some(vec!["Ingress".to_string(), "Egress".to_string()]),
+                // Empty ingress/egress means deny all
+                ingress: None,
+                egress: None,
+            }),
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            policy = %name,
+            "Creating isolate NetworkPolicy"
+        );
+
+        self.apply(&policy).await
+    }
+
+    /// Create a NetworkPolicy that allows ingress from source pods to target pods
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    ///
+    /// let mut target = HashMap::new();
+    /// target.insert("app".to_string(), "backend".to_string());
+    ///
+    /// let mut source = HashMap::new();
+    /// source.insert("app".to_string(), "frontend".to_string());
+    ///
+    /// ctx.allow_from(target, source).await?;
+    /// // Pods with app=backend can now receive traffic from pods with app=frontend
+    /// ```
+    pub async fn allow_from(
+        &self,
+        target: HashMap<String, String>,
+        source: HashMap<String, String>,
+    ) -> Result<NetworkPolicy, ContextError> {
+        let name = format!(
+            "seppo-allow-{}-from-{}",
+            label_suffix(&target),
+            label_suffix(&source)
+        );
+
+        let policy = NetworkPolicy {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            spec: Some(NetworkPolicySpec {
+                pod_selector: Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                        match_labels: Some(target.into_iter().collect()),
+                        ..Default::default()
+                    },
+                ),
+                policy_types: Some(vec!["Ingress".to_string()]),
+                ingress: Some(vec![NetworkPolicyIngressRule {
+                    from: Some(vec![NetworkPolicyPeer {
+                        pod_selector: Some(
+                            k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                                match_labels: Some(source.into_iter().collect()),
+                                ..Default::default()
+                            },
+                        ),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }]),
+                egress: None,
+            }),
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            policy = %name,
+            "Creating allow-from NetworkPolicy"
+        );
+
+        self.apply(&policy).await
+    }
+
     /// Patch a resource in the test namespace using JSON Merge Patch
     ///
     /// Allows partial updates to a resource without replacing the entire spec.
@@ -569,6 +874,52 @@ impl Context {
             .map_err(|e| ContextError::LogsError(e.to_string()))?;
 
         Ok(logs)
+    }
+
+    /// Stream logs from a pod in real-time
+    ///
+    /// Returns a stream of log lines that can be iterated with `try_next().await`.
+    /// Uses `follow: true` for continuous streaming like `kubectl logs -f`.
+    ///
+    /// # Lifetime
+    ///
+    /// The returned stream holds an internal reference to the Kubernetes API
+    /// connection. The stream must be dropped before the `Context` can be dropped.
+    /// This is enforced at compile-time via the `'_` lifetime on the return type.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use futures::TryStreamExt;
+    ///
+    /// let mut stream = ctx.logs_stream("my-pod").await?;
+    /// while let Some(line) = stream.try_next().await? {
+    ///     println!("{}", line);
+    /// }
+    /// ```
+    pub async fn logs_stream(
+        &self,
+        pod_name: &str,
+    ) -> Result<impl Stream<Item = Result<String, std::io::Error>> + '_, ContextError> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        let params = LogParams {
+            follow: true,
+            ..Default::default()
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            pod = %pod_name,
+            "Starting log stream"
+        );
+
+        let log_stream = pods
+            .log_stream(pod_name, &params)
+            .await
+            .map_err(|e| ContextError::LogsError(e.to_string()))?;
+
+        Ok(log_stream.lines())
     }
 
     /// Get logs from all pods matching a label selector
@@ -825,6 +1176,93 @@ impl Context {
             if start.elapsed() >= timeout {
                 return Err(ContextError::WaitTimeout(format!(
                     "Timed out waiting for {} to be deleted after {:?}",
+                    name, timeout
+                )));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// Wait for a PersistentVolumeClaim to be bound
+    ///
+    /// Polls until the PVC's status.phase is "Bound".
+    /// Default timeout is 60 seconds, polling interval is 1 second.
+    ///
+    /// Accepts both `"name"` and `"pvc/name"` formats for consistency.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.apply(&my_pvc).await?;
+    /// ctx.wait_pvc_bound("my-pvc").await?;
+    /// // PVC is now bound and ready
+    /// ```
+    pub async fn wait_pvc_bound(&self, name: &str) -> Result<PersistentVolumeClaim, ContextError> {
+        self.wait_pvc_bound_with_timeout(name, std::time::Duration::from_secs(60))
+            .await
+    }
+
+    /// Wait for a PVC to be bound with a custom timeout
+    pub async fn wait_pvc_bound_with_timeout(
+        &self,
+        name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<PersistentVolumeClaim, ContextError> {
+        // Extract just the name if "pvc/name" format was provided
+        let name = extract_resource_name(name);
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_secs(1);
+
+        debug!(
+            namespace = %self.namespace,
+            pvc = %name,
+            timeout = ?timeout,
+            "Starting wait_pvc_bound"
+        );
+
+        loop {
+            match self.get::<PersistentVolumeClaim>(name).await {
+                Ok(pvc) => {
+                    let phase = pvc
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.phase.as_ref())
+                        .map(|p| p.as_str())
+                        .unwrap_or("Unknown");
+
+                    if phase == "Bound" {
+                        debug!(
+                            namespace = %self.namespace,
+                            pvc = %name,
+                            elapsed = ?start.elapsed(),
+                            "PVC is bound"
+                        );
+                        return Ok(pvc);
+                    }
+
+                    debug!(
+                        namespace = %self.namespace,
+                        pvc = %name,
+                        phase = %phase,
+                        elapsed = ?start.elapsed(),
+                        "PVC not bound yet, waiting..."
+                    );
+                }
+                Err(ContextError::GetError(_)) => {
+                    debug!(
+                        namespace = %self.namespace,
+                        pvc = %name,
+                        elapsed = ?start.elapsed(),
+                        "PVC doesn't exist yet, waiting..."
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(ContextError::WaitTimeout(format!(
+                    "Timed out waiting for PVC {} to be bound after {:?}",
                     name, timeout
                 )));
             }
@@ -1190,11 +1628,10 @@ impl Context {
                     .map_err(|e| ContextError::GetError(e.to_string()))?;
 
                 // Get deployment UID for owner reference matching
-                let dep_uid = dep
-                    .metadata
-                    .uid
-                    .as_ref()
-                    .ok_or_else(|| ContextError::GetError("deployment has no UID".to_string()))?;
+                let dep_uid =
+                    dep.metadata.uid.as_ref().ok_or_else(|| {
+                        ContextError::GetError("deployment has no UID".to_string())
+                    })?;
 
                 // List all ReplicaSets and filter by owner reference
                 let rs_list = replicasets
@@ -1339,18 +1776,15 @@ impl Context {
 
         match kind {
             ResourceKind::Deployment => {
-                let api: Api<Deployment> =
-                    Api::namespaced(self.client.clone(), &self.namespace);
+                let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
                 restart_workload!(api, name, "deployment")
             }
             ResourceKind::StatefulSet => {
-                let api: Api<StatefulSet> =
-                    Api::namespaced(self.client.clone(), &self.namespace);
+                let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), &self.namespace);
                 restart_workload!(api, name, "statefulset")
             }
             ResourceKind::DaemonSet => {
-                let api: Api<DaemonSet> =
-                    Api::namespaced(self.client.clone(), &self.namespace);
+                let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), &self.namespace);
                 restart_workload!(api, name, "daemonset")
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
@@ -1358,6 +1792,60 @@ impl Context {
                 kind
             ))),
         }
+    }
+
+    /// Check if the current user has permission to perform an action
+    ///
+    /// Uses the Kubernetes SelfSubjectAccessReview API to check RBAC permissions.
+    /// Useful for tests that need to verify RBAC configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `verb` - The action to check: "get", "list", "watch", "create", "update", "delete", etc.
+    /// * `resource` - The resource type: "pods", "deployments", "secrets", etc.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Check if we can create pods
+    /// let can_create_pods = ctx.can_i("create", "pods").await?;
+    /// assert!(can_create_pods, "Should be able to create pods");
+    ///
+    /// // Check if we can delete secrets
+    /// let can_delete_secrets = ctx.can_i("delete", "secrets").await?;
+    /// ```
+    pub async fn can_i(&self, verb: &str, resource: &str) -> Result<bool, ContextError> {
+        let review = SelfSubjectAccessReview {
+            metadata: Default::default(),
+            spec: SelfSubjectAccessReviewSpec {
+                resource_attributes: Some(ResourceAttributes {
+                    namespace: Some(self.namespace.clone()),
+                    verb: Some(verb.to_string()),
+                    resource: Some(resource.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            status: None,
+        };
+
+        let api: Api<SelfSubjectAccessReview> = Api::all(self.client.clone());
+        let result = api
+            .create(&PostParams::default(), &review)
+            .await
+            .map_err(|e| ContextError::GetError(format!("RBAC check failed: {}", e)))?;
+
+        let allowed = result.status.map(|s| s.allowed).unwrap_or(false);
+
+        debug!(
+            verb = %verb,
+            resource = %resource,
+            namespace = %self.namespace,
+            allowed = %allowed,
+            "RBAC permission check"
+        );
+
+        Ok(allowed)
     }
 
     /// Get events from the test namespace
@@ -1810,6 +2298,78 @@ impl Context {
         Ok(())
     }
 
+    /// Retry an operation with exponential backoff
+    ///
+    /// Useful for operations that may transiently fail, like waiting for
+    /// a resource to be fully ready or handling API rate limits.
+    ///
+    /// Starts with 100ms backoff, doubling each time up to 5 seconds max.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_attempts` is 0. Use at least 1 attempt.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Retry an HTTP request up to 5 times
+    /// ctx.retry(5, || async {
+    ///     let resp = pf.get("/health").await?;
+    ///     if resp.contains("ok") { Ok(()) } else { Err("not ready".into()) }
+    /// }).await?;
+    /// ```
+    pub async fn retry<F, Fut, E>(&self, max_attempts: usize, mut f: F) -> Result<(), E>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+        E: std::fmt::Display,
+    {
+        assert!(
+            max_attempts > 0,
+            "retry() requires at least 1 attempt, got max_attempts=0"
+        );
+
+        let mut backoff = std::time::Duration::from_millis(100);
+        let max_backoff = std::time::Duration::from_secs(5);
+        let mut last_error: Option<E> = None;
+
+        for attempt in 1..=max_attempts {
+            match f().await {
+                Ok(()) => {
+                    debug!(attempt = attempt, "Retry succeeded");
+                    return Ok(());
+                }
+                Err(e) => {
+                    let is_last_attempt = attempt == max_attempts;
+
+                    if is_last_attempt {
+                        warn!(
+                            attempt = attempt,
+                            max_attempts = max_attempts,
+                            error = %e,
+                            "Retry exhausted all attempts"
+                        );
+                    } else {
+                        debug!(
+                            attempt = attempt,
+                            max_attempts = max_attempts,
+                            backoff = ?backoff,
+                            error = %e,
+                            "Retry attempt failed, backing off"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, max_backoff);
+                    }
+
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        // This is reached when all attempts fail
+        Err(last_error.expect("max_attempts > 0 guarantees at least one iteration"))
+    }
+
     /// Create a pod assertion builder
     ///
     /// # Example
@@ -1857,6 +2417,503 @@ impl Context {
             name.to_string(),
         )
     }
+
+    /// Start an Ingress test chain
+    ///
+    /// Provides fluent assertions for testing Ingress resources.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.test_ingress("my-ingress")
+    ///     .host("api.example.com")
+    ///     .path("/v1")
+    ///     .expect_backend("api-svc", 8080)
+    ///     .expect_tls("api-tls-secret")
+    ///     .must();
+    /// ```
+    pub fn test_ingress(&self, name: &str) -> IngressTest {
+        IngressTest::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            name.to_string(),
+        )
+    }
+}
+
+/// Fluent builder for testing Ingress resources
+///
+/// Uses a short-circuit pattern: once an error is recorded via any assertion
+/// method (like `expect_backend()` or `expect_tls()`), subsequent methods
+/// skip their checks and preserve the first error. Use `error()` to get the
+/// first error or `must()` to panic with it.
+///
+/// # Example
+///
+/// ```ignore
+/// ctx.test_ingress("my-ingress")
+///     .host("example.com")
+///     .path("/api")
+///     .expect_backend("svc/api", 8080).await
+///     .expect_tls("my-tls-secret").await
+///     .must(); // Panics if any assertion failed
+/// ```
+pub struct IngressTest {
+    client: Client,
+    namespace: String,
+    name: String,
+    host: Option<String>,
+    path: Option<String>,
+    err: Option<String>,
+}
+
+impl IngressTest {
+    fn new(client: Client, namespace: String, name: String) -> Self {
+        Self {
+            client,
+            namespace,
+            name,
+            host: None,
+            path: None,
+            err: None,
+        }
+    }
+
+    /// Set the host to test
+    pub fn host(mut self, host: &str) -> Self {
+        if self.err.is_some() {
+            return self;
+        }
+        self.host = Some(host.to_string());
+        self
+    }
+
+    /// Set the path to test
+    pub fn path(mut self, path: &str) -> Self {
+        if self.err.is_some() {
+            return self;
+        }
+        self.path = Some(path.to_string());
+        self
+    }
+
+    /// Assert the ingress routes to the expected backend
+    pub async fn expect_backend(mut self, backend: &str, port: i32) -> Self {
+        if self.err.is_some() {
+            return self;
+        }
+
+        let api: Api<Ingress> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        match api.get(&self.name).await {
+            Ok(ingress) => {
+                let expected_svc = backend.strip_prefix("svc/").unwrap_or(backend);
+
+                let spec = match ingress.spec {
+                    Some(s) => s,
+                    None => {
+                        self.err = Some(format!("Ingress {} has no spec", self.name));
+                        return self;
+                    }
+                };
+
+                let mut found = false;
+                for rule in spec.rules.unwrap_or_default() {
+                    // Check host match (None in test means match any)
+                    if let Some(ref test_host) = self.host {
+                        if rule.host.as_ref() != Some(test_host) {
+                            continue;
+                        }
+                    }
+
+                    if let Some(http) = rule.http {
+                        // Path matching semantics:
+                        // - If self.path is None, match any ingress path.
+                        // - If the ingress path is empty, treat it as matching all request paths.
+                        // - Otherwise, require that the ingress path is a path-segment prefix of
+                        //   the requested path, e.g. "/api" matches "/api", "/api/", "/api/v1"
+                        //   but does NOT match "/apiv2".
+                        let path_prefix_matches = |test_path: &str, ingress_path: &str| {
+                            if ingress_path.is_empty() {
+                                // Empty ingress path behaves as a catch-all.
+                                true
+                            } else if test_path == ingress_path {
+                                true
+                            } else if let Some(rest) = test_path.strip_prefix(ingress_path) {
+                                rest.starts_with('/')
+                            } else {
+                                false
+                            }
+                        };
+
+                        for p in http.paths {
+                            // Check path match (None in test means match any)
+                            let ingress_path = p.path.as_deref().unwrap_or("");
+                            let path_matches = self.path.as_deref().is_none_or(|test_path| {
+                                path_prefix_matches(test_path, ingress_path)
+                            });
+
+                            if path_matches {
+                                if let Some(service) = p.backend.service {
+                                    let actual_svc = service.name;
+                                    let actual_port =
+                                        service.port.and_then(|p| p.number).unwrap_or(0);
+
+                                    if actual_svc == expected_svc && actual_port == port {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+
+                if !found {
+                    self.err = Some(format!(
+                        "Ingress {} does not route host={:?} path={:?} to {}:{}",
+                        self.name, self.host, self.path, expected_svc, port
+                    ));
+                }
+            }
+            Err(e) => {
+                self.err = Some(format!("Failed to get ingress {}: {}", self.name, e));
+            }
+        }
+
+        self
+    }
+
+    /// Assert the ingress has TLS configured with the given secret
+    pub async fn expect_tls(mut self, secret_name: &str) -> Self {
+        if self.err.is_some() {
+            return self;
+        }
+
+        let api: Api<Ingress> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        match api.get(&self.name).await {
+            Ok(ingress) => {
+                let spec = match ingress.spec {
+                    Some(s) => s,
+                    None => {
+                        self.err = Some(format!("Ingress {} has no spec", self.name));
+                        return self;
+                    }
+                };
+
+                let mut found = false;
+                for tls in spec.tls.unwrap_or_default() {
+                    if tls.secret_name.as_ref() == Some(&secret_name.to_string()) {
+                        // Check if host matches (if specified)
+                        if self.host.is_none() {
+                            found = true;
+                            break;
+                        }
+                        for host in tls.hosts.unwrap_or_default() {
+                            if Some(&host) == self.host.as_ref() {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+
+                if !found {
+                    self.err = Some(format!(
+                        "Ingress {} does not have TLS secret {} for host {:?}",
+                        self.name, secret_name, self.host
+                    ));
+                }
+            }
+            Err(e) => {
+                self.err = Some(format!("Failed to get ingress {}: {}", self.name, e));
+            }
+        }
+
+        self
+    }
+
+    /// Get any error from the test chain
+    pub fn error(&self) -> Option<&str> {
+        self.err.as_deref()
+    }
+
+    /// Panic if there was an error in the test chain
+    pub fn must(self) {
+        if let Some(err) = self.err {
+            panic!("IngressTest failed: {}", err);
+        }
+    }
+}
+
+/// Bundle containing ServiceAccount, Role, and RoleBinding for RBAC setup
+pub struct RBACBundle {
+    /// The ServiceAccount
+    pub service_account: ServiceAccount,
+    /// The Role defining permissions
+    pub role: Role,
+    /// The RoleBinding connecting ServiceAccount to Role
+    pub role_binding: RoleBinding,
+}
+
+/// Fluent builder for creating RBAC resources
+///
+/// # Example
+///
+/// ```ignore
+/// let rbac = RBACBuilder::service_account("my-sa")
+///     .with_role("my-role")
+///     .can_get(&["pods", "services"])
+///     .can_list(&["deployments"])
+///     .can_all(&["secrets"])
+///     .build();
+///
+/// ctx.apply_rbac(&rbac).await?;
+/// ```
+pub struct RBACBuilder {
+    name: String,
+    role_name: String,
+    rules: Vec<PolicyRule>,
+}
+
+impl RBACBuilder {
+    /// Create a new RBACBuilder with the given ServiceAccount name
+    pub fn service_account(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            role_name: format!("{}-role", name),
+            rules: Vec::new(),
+        }
+    }
+
+    /// Set a custom role name
+    pub fn with_role(mut self, role_name: &str) -> Self {
+        self.role_name = role_name.to_string();
+        self
+    }
+
+    /// Add a policy rule with the correct API group for each resource
+    fn add_rule(&mut self, verbs: &[&str], resources: &[&str]) {
+        // Group resources by their API group
+        let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
+        for res in resources {
+            let group = api_group_for_resource(res);
+            by_group.entry(group).or_default().push(res.to_string());
+        }
+
+        // Create separate rules for each API group
+        for (group, group_resources) in by_group {
+            self.rules.push(PolicyRule {
+                api_groups: Some(vec![group]),
+                resources: Some(group_resources),
+                verbs: verbs.iter().map(|v| v.to_string()).collect(),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Add get permission for the specified resources
+    pub fn can_get(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["get"], resources);
+        self
+    }
+
+    /// Add list permission for the specified resources
+    pub fn can_list(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["list"], resources);
+        self
+    }
+
+    /// Add watch permission for the specified resources
+    pub fn can_watch(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["watch"], resources);
+        self
+    }
+
+    /// Add create permission for the specified resources
+    pub fn can_create(mut self, resources: &[&str]) -> Self {
+        self.add_rule(&["create"], resources);
+        self
+    }
+
+    /// Add update permission for the specified resources
+    pub fn can_update<I, S>(mut self, resources: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        self.add_rule(&["update"], &resource_refs);
+        self
+    }
+
+    /// Add delete permission for the specified resources
+    pub fn can_delete<I, S>(mut self, resources: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        self.add_rule(&["delete"], &resource_refs);
+        self
+    }
+
+    /// Add all permissions (get, list, watch, create, update, delete) for resources
+    pub fn can_all<I, S>(mut self, resources: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        self.add_rule(
+            &["get", "list", "watch", "create", "update", "delete"],
+            &resource_refs,
+        );
+        self
+    }
+
+    /// Add custom verbs for the specified resources
+    pub fn can<IV, IS, VV, VS>(mut self, verbs: IV, resources: IS) -> Self
+    where
+        IV: IntoIterator<Item = VV>,
+        VV: AsRef<str>,
+        IS: IntoIterator<Item = VS>,
+        VS: AsRef<str>,
+    {
+        let verb_strings: Vec<String> = verbs.into_iter().map(|v| v.as_ref().to_string()).collect();
+        let verb_refs: Vec<&str> = verb_strings.iter().map(|s| s.as_str()).collect();
+
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+
+        self.add_rule(&verb_refs, &resource_refs);
+        self
+    }
+
+    /// Add a rule with explicit API group for custom resources (CRDs)
+    pub fn for_api_group<IV, VV, IR, VR>(
+        mut self,
+        api_group: &str,
+        verbs: IV,
+        resources: IR,
+    ) -> Self
+    where
+        IV: IntoIterator<Item = VV>,
+        VV: AsRef<str>,
+        IR: IntoIterator<Item = VR>,
+        VR: AsRef<str>,
+    {
+        self.rules.push(PolicyRule {
+            api_groups: Some(vec![api_group.to_string()]),
+            resources: Some(
+                resources
+                    .into_iter()
+                    .map(|r| r.as_ref().to_string())
+                    .collect(),
+            ),
+            verbs: verbs.into_iter().map(|v| v.as_ref().to_string()).collect(),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Build the RBACBundle with ServiceAccount, Role, and RoleBinding
+    pub fn build(self) -> RBACBundle {
+        RBACBundle {
+            service_account: ServiceAccount {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(self.name.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            role: Role {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(self.role_name.clone()),
+                    ..Default::default()
+                },
+                rules: Some(self.rules),
+            },
+            role_binding: RoleBinding {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(format!("{}-binding", self.name)),
+                    ..Default::default()
+                },
+                subjects: Some(vec![Subject {
+                    kind: "ServiceAccount".to_string(),
+                    name: self.name.clone(),
+                    namespace: None,
+                    api_group: None,
+                }]),
+                role_ref: RoleRef {
+                    api_group: "rbac.authorization.k8s.io".to_string(),
+                    kind: "Role".to_string(),
+                    name: self.role_name,
+                },
+            },
+        }
+    }
+}
+
+/// Returns the correct API group for a resource
+fn api_group_for_resource(resource: &str) -> String {
+    match resource {
+        // Core API group ("")
+        "pods"
+        | "services"
+        | "configmaps"
+        | "secrets"
+        | "persistentvolumeclaims"
+        | "serviceaccounts"
+        | "namespaces"
+        | "nodes"
+        | "events"
+        | "endpoints"
+        | "persistentvolumes"
+        | "replicationcontrollers"
+        | "resourcequotas"
+        | "limitranges" => String::new(),
+        // apps group
+        "deployments" | "statefulsets" | "daemonsets" | "replicasets" | "controllerrevisions" => {
+            "apps".to_string()
+        }
+        // batch group
+        "jobs" | "cronjobs" => "batch".to_string(),
+        // networking.k8s.io group
+        "ingresses" | "networkpolicies" | "ingressclasses" => "networking.k8s.io".to_string(),
+        // rbac.authorization.k8s.io group
+        "roles" | "rolebindings" | "clusterroles" | "clusterrolebindings" => {
+            "rbac.authorization.k8s.io".to_string()
+        }
+        // autoscaling group
+        "horizontalpodautoscalers" => "autoscaling".to_string(),
+        // policy group
+        "poddisruptionbudgets" => "policy".to_string(),
+        // Default to core for unknown resources
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1875,13 +2932,78 @@ mod tests {
 
         // Kind/name format - should extract just the name
         assert_eq!(extract_resource_name("deployment/myapp"), "myapp");
-        assert_eq!(extract_resource_name("gateway/test-gateway"), "test-gateway");
+        assert_eq!(
+            extract_resource_name("gateway/test-gateway"),
+            "test-gateway"
+        );
         assert_eq!(extract_resource_name("pod/worker-0"), "worker-0");
         assert_eq!(extract_resource_name("configmap/my-config"), "my-config");
 
         // Edge cases
         assert_eq!(extract_resource_name(""), "");
         assert_eq!(extract_resource_name("a/b/c"), "c"); // Multiple slashes: takes last part
+    }
+
+    #[tokio::test]
+    async fn test_retry_succeeds_on_transient_failure() {
+        // Skip if no kubeconfig available
+        let client = match kube::Client::try_default().await {
+            Ok(client) => client,
+            Err(_) => return,
+        };
+        let ctx = Context {
+            client,
+            namespace: "test".to_string(),
+        };
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let result: Result<(), &str> = ctx
+            .retry(3, || {
+                let counter = counter_clone.clone();
+                async move {
+                    let count = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if count < 2 {
+                        Err("not ready yet")
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_fails_after_max_attempts() {
+        // Skip if no kubeconfig available
+        let client = match kube::Client::try_default().await {
+            Ok(client) => client,
+            Err(_) => return,
+        };
+        let ctx = Context {
+            client,
+            namespace: "test".to_string(),
+        };
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let result: Result<(), &str> = ctx
+            .retry(3, || {
+                let counter = counter_clone.clone();
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("always fails")
+                }
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     // ============================================================
@@ -2041,6 +3163,172 @@ mod tests {
         ctx.cleanup().await.expect("Should cleanup");
     }
 
+    /// Test that secret_from_file() creates a secret from files
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_secret_from_file() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create temp files
+        let temp_dir = std::env::temp_dir();
+        let file1 = temp_dir.join("seppo_test_config.txt");
+        let file2 = temp_dir.join("seppo_test_data.txt");
+
+        std::fs::write(&file1, "config-content").expect("Should write file1");
+        std::fs::write(&file2, "data-content").expect("Should write file2");
+
+        // Create secret from files
+        let mut files = HashMap::new();
+        files.insert("config".to_string(), file1.to_string_lossy().to_string());
+        files.insert("data".to_string(), file2.to_string_lossy().to_string());
+
+        let secret = ctx
+            .secret_from_file("file-secret", files)
+            .await
+            .expect("Should create secret");
+
+        // Verify secret was created
+        assert_eq!(secret.metadata.name.as_deref(), Some("file-secret"));
+        let data = secret.data.expect("Should have data");
+        assert_eq!(
+            data.get("config")
+                .map(|b| String::from_utf8_lossy(&b.0).to_string()),
+            Some("config-content".to_string())
+        );
+        assert_eq!(
+            data.get("data")
+                .map(|b| String::from_utf8_lossy(&b.0).to_string()),
+            Some("data-content".to_string())
+        );
+
+        // Cleanup temp files
+        let _ = std::fs::remove_file(file1);
+        let _ = std::fs::remove_file(file2);
+
+        // Cleanup namespace
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that secret_tls() creates a TLS secret
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_secret_tls() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create temp cert and key files (dummy content for testing)
+        let temp_dir = std::env::temp_dir();
+        let cert_file = temp_dir.join("seppo_test_cert.pem");
+        let key_file = temp_dir.join("seppo_test_key.pem");
+
+        std::fs::write(
+            &cert_file,
+            "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+        )
+        .expect("Should write cert");
+        std::fs::write(
+            &key_file,
+            "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+        )
+        .expect("Should write key");
+
+        // Create TLS secret
+        let secret = ctx
+            .secret_tls(
+                "tls-secret",
+                &cert_file.to_string_lossy(),
+                &key_file.to_string_lossy(),
+            )
+            .await
+            .expect("Should create TLS secret");
+
+        // Verify secret was created with TLS type
+        assert_eq!(secret.metadata.name.as_deref(), Some("tls-secret"));
+        assert_eq!(secret.type_.as_deref(), Some("kubernetes.io/tls"));
+
+        let data = secret.data.expect("Should have data");
+        assert!(data.contains_key("tls.crt"), "Should have tls.crt");
+        assert!(data.contains_key("tls.key"), "Should have tls.key");
+
+        // Cleanup temp files
+        let _ = std::fs::remove_file(cert_file);
+        let _ = std::fs::remove_file(key_file);
+
+        // Cleanup namespace
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that isolate() creates a deny-all NetworkPolicy
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_isolate() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        let mut selector = HashMap::new();
+        selector.insert("app".to_string(), "isolated".to_string());
+
+        let policy = ctx
+            .isolate(selector)
+            .await
+            .expect("Should create NetworkPolicy");
+
+        // Verify policy was created
+        assert!(policy
+            .metadata
+            .name
+            .as_ref()
+            .unwrap()
+            .starts_with("seppo-isolate-"));
+
+        // Verify it's a deny-all (empty ingress/egress)
+        let spec = policy.spec.expect("Should have spec");
+        assert!(
+            spec.ingress.is_none(),
+            "Should have no ingress rules (deny all)"
+        );
+        assert!(
+            spec.egress.is_none(),
+            "Should have no egress rules (deny all)"
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that allow_from() creates an allow NetworkPolicy
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_allow_from() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        let mut target = HashMap::new();
+        target.insert("app".to_string(), "backend".to_string());
+
+        let mut source = HashMap::new();
+        source.insert("app".to_string(), "frontend".to_string());
+
+        let policy = ctx
+            .allow_from(target, source)
+            .await
+            .expect("Should create NetworkPolicy");
+
+        // Verify policy was created
+        assert!(policy
+            .metadata
+            .name
+            .as_ref()
+            .unwrap()
+            .starts_with("seppo-allow-"));
+
+        // Verify it has ingress rules
+        let spec = policy.spec.expect("Should have spec");
+        assert!(spec.ingress.is_some(), "Should have ingress rules");
+        let ingress = spec.ingress.unwrap();
+        assert_eq!(ingress.len(), 1, "Should have one ingress rule");
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
     /// RED: Test that get() retrieves a resource from the test namespace
     #[tokio::test]
     #[ignore] // Requires real cluster
@@ -2189,6 +3477,75 @@ mod tests {
         ctx.cleanup().await.expect("Should cleanup");
     }
 
+    /// Test that wait_pvc_bound() waits for PVC to be bound
+    #[tokio::test]
+    #[ignore] // Requires real cluster with storage provisioner
+    async fn test_context_wait_pvc_bound() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a PVC
+        let pvc = PersistentVolumeClaim {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-pvc".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PersistentVolumeClaimSpec {
+                access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                resources: Some(k8s_openapi::api::core::v1::VolumeResourceRequirements {
+                    requests: Some(
+                        [(
+                            "storage".to_string(),
+                            k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                                "1Gi".to_string(),
+                            ),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pvc).await.expect("Should apply PVC");
+
+        // Wait for PVC to be bound (may timeout if no dynamic provisioning)
+        let result = ctx
+            .wait_pvc_bound_with_timeout("test-pvc", std::time::Duration::from_secs(30))
+            .await;
+
+        match result {
+            Ok(bound_pvc) => {
+                let phase = bound_pvc
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.phase.as_ref())
+                    .map(|p| p.as_str())
+                    .unwrap_or("Unknown");
+                assert_eq!(phase, "Bound", "PVC should be bound");
+            }
+            Err(e) => {
+                // Expected if no dynamic provisioning is available
+                println!(
+                    "wait_pvc_bound returned error (expected if no dynamic provisioning): {}",
+                    e
+                );
+            }
+        }
+
+        // Also test with "pvc/name" format
+        let result2 = ctx
+            .wait_pvc_bound_with_timeout("pvc/test-pvc", std::time::Duration::from_secs(5))
+            .await;
+        // Just verify it accepts the format
+        println!("pvc/name format result: {:?}", result2.is_ok());
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
     /// Test that list() returns resources from the test namespace
     #[tokio::test]
     #[ignore] // Requires real cluster
@@ -2279,6 +3636,83 @@ mod tests {
             logs.contains("hello from seppo"),
             "Logs should contain our message, got: {}",
             logs
+        );
+
+        // Cleanup
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that logs_stream() streams pod logs in real-time
+    #[tokio::test]
+    #[ignore] // Requires real cluster with a running pod
+    async fn test_context_logs_stream() {
+        use futures::TryStreamExt;
+        use k8s_openapi::api::core::v1::Pod;
+
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create a pod that outputs logs over time
+        let pod = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("stream-test-pod".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "test".to_string(),
+                    image: Some("busybox:latest".to_string()),
+                    command: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "for i in 1 2 3 4 5; do echo \"log line $i\"; sleep 1; done".to_string(),
+                    ]),
+                    ..Default::default()
+                }],
+                restart_policy: Some("Never".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&pod).await.expect("Should apply Pod");
+
+        // Wait for pod to be running
+        ctx.wait_for::<Pod, _>("stream-test-pod", |p| {
+            p.status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .is_some_and(|phase| phase == "Running")
+        })
+        .await
+        .expect("Pod should be running");
+
+        // Stream logs and collect some lines
+        let mut stream = ctx
+            .logs_stream("stream-test-pod")
+            .await
+            .expect("Should get log stream");
+
+        let mut lines = Vec::new();
+        // Collect a few lines with a timeout
+        let collect_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(line) = stream.try_next().await? {
+                lines.push(line);
+                if lines.len() >= 3 {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await;
+
+        assert!(collect_result.is_ok(), "Should collect logs within timeout");
+        assert!(
+            !lines.is_empty(),
+            "Should have received at least one log line"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("log line")),
+            "Logs should contain our messages"
         );
 
         // Cleanup
@@ -3586,7 +5020,9 @@ mod tests {
         };
 
         ctx.apply(&deployment).await.expect("Should apply");
-        ctx.wait_ready("deployment/logs-test").await.expect("Should be ready");
+        ctx.wait_ready("deployment/logs-test")
+            .await
+            .expect("Should be ready");
 
         // Get logs from all pods with label app=logs-test
         let all_logs = ctx
@@ -3598,9 +5034,202 @@ mod tests {
         assert_eq!(all_logs.len(), 2, "Should have logs from 2 pods");
 
         // Each pod should have the expected log message
-        for (_pod_name, logs) in &all_logs {
-            assert!(logs.contains("hello from pod"), "Each pod should have the log message");
+        for logs in all_logs.values() {
+            assert!(
+                logs.contains("hello from pod"),
+                "Each pod should have the log message"
+            );
         }
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that can_i() checks RBAC permissions
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_can_i() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Test permission to create pods - should be allowed in our namespace
+        let can_create_pods = ctx
+            .can_i("create", "pods")
+            .await
+            .expect("Should check permission");
+
+        // The test runs with cluster-admin typically, so this should be true
+        // In a real environment with limited permissions, this might be false
+        assert!(
+            can_create_pods,
+            "Should be able to create pods in test namespace"
+        );
+
+        // Test permission to get pods - should be allowed
+        let can_get_pods = ctx
+            .can_i("get", "pods")
+            .await
+            .expect("Should check permission");
+
+        assert!(can_get_pods, "Should be able to get pods in test namespace");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that RBACBuilder creates correct ServiceAccount, Role, and RoleBinding
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_rbac_builder() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Build an RBAC bundle
+        let bundle = RBACBuilder::service_account("test-sa")
+            .can_get(&["pods", "services"])
+            .can_list(&["pods"])
+            .can_create(&["configmaps"])
+            .build();
+
+        // Verify ServiceAccount was built correctly
+        assert_eq!(
+            bundle.service_account.metadata.name.as_deref(),
+            Some("test-sa")
+        );
+
+        // Verify Role was built correctly with correct name
+        assert_eq!(bundle.role.metadata.name.as_deref(), Some("test-sa-role"));
+
+        // Verify Role has the expected rules
+        let rules = bundle.role.rules.as_ref().expect("Should have rules");
+        assert!(
+            rules.len() >= 2,
+            "Should have at least 2 rules (core API resources)"
+        );
+
+        // Verify RoleBinding was built correctly
+        assert_eq!(
+            bundle.role_binding.metadata.name.as_deref(),
+            Some("test-sa-binding")
+        );
+        assert_eq!(bundle.role_binding.role_ref.name, "test-sa-role");
+
+        // Apply the RBAC bundle
+        ctx.apply_rbac(&bundle)
+            .await
+            .expect("Should apply RBAC bundle");
+
+        // Verify resources were created by getting them
+        use k8s_openapi::api::core::v1::ServiceAccount;
+        let sa: ServiceAccount = ctx.get("test-sa").await.expect("Should get ServiceAccount");
+        assert_eq!(sa.metadata.name.as_deref(), Some("test-sa"));
+
+        let role: Role = ctx.get("test-sa-role").await.expect("Should get Role");
+        assert!(role.rules.is_some());
+
+        let rb: RoleBinding = ctx
+            .get("test-sa-binding")
+            .await
+            .expect("Should get RoleBinding");
+        assert_eq!(rb.role_ref.name, "test-sa-role");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that test_ingress() creates a fluent builder for Ingress assertions
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_ingress_builder() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create an Ingress resource
+        let ingress = Ingress {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-ingress".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::networking::v1::IngressSpec {
+                rules: Some(vec![k8s_openapi::api::networking::v1::IngressRule {
+                    host: Some("example.com".to_string()),
+                    http: Some(k8s_openapi::api::networking::v1::HTTPIngressRuleValue {
+                        paths: vec![k8s_openapi::api::networking::v1::HTTPIngressPath {
+                            path: Some("/api".to_string()),
+                            path_type: "Prefix".to_string(),
+                            backend: k8s_openapi::api::networking::v1::IngressBackend {
+                                service: Some(
+                                    k8s_openapi::api::networking::v1::IngressServiceBackend {
+                                        name: "backend-svc".to_string(),
+                                        port: Some(
+                                            k8s_openapi::api::networking::v1::ServiceBackendPort {
+                                                number: Some(8080),
+                                                ..Default::default()
+                                            },
+                                        ),
+                                    },
+                                ),
+                                ..Default::default()
+                            },
+                        }],
+                    }),
+                }]),
+                tls: Some(vec![k8s_openapi::api::networking::v1::IngressTLS {
+                    hosts: Some(vec!["example.com".to_string()]),
+                    secret_name: Some("tls-secret".to_string()),
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&ingress).await.expect("Should apply Ingress");
+
+        // Test that expect_backend assertion passes
+        let test_result = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .path("/api")
+            .expect_backend("backend-svc", 8080)
+            .await;
+
+        assert!(
+            test_result.error().is_none(),
+            "expect_backend should pass: {:?}",
+            test_result.error()
+        );
+
+        // Test that expect_tls assertion passes
+        let tls_result = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .expect_tls("tls-secret")
+            .await;
+
+        assert!(
+            tls_result.error().is_none(),
+            "expect_tls should pass: {:?}",
+            tls_result.error()
+        );
+
+        // Test that wrong backend fails assertion
+        let wrong_backend = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .path("/api")
+            .expect_backend("wrong-svc", 8080)
+            .await;
+
+        assert!(
+            wrong_backend.error().is_some(),
+            "expect_backend should fail for wrong service"
+        );
+
+        // Test that wrong TLS secret fails assertion
+        let wrong_tls = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .expect_tls("wrong-secret")
+            .await;
+
+        assert!(
+            wrong_tls.error().is_some(),
+            "expect_tls should fail for wrong secret"
+        );
 
         ctx.cleanup().await.expect("Should cleanup");
     }

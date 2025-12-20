@@ -147,8 +147,14 @@ mod tests {
                         // Parse kernel version and check if >= 6.8
                         let version_str = kernel.trim().split('-').next().unwrap_or("").trim();
                         let mut parts = version_str.split('.');
-                        let major = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-                        let minor = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                        let major = parts
+                            .next()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        let minor = parts
+                            .next()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(0);
                         if major > 6 || (major == 6 && minor >= 8) {
                             return std::env::var("SEPPO_FORCE_KIND_TEST").is_ok();
                         }

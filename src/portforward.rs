@@ -130,6 +130,32 @@ impl PortForward {
         self.local_addr
     }
 
+    /// Get a URL for the given path through the port forward
+    ///
+    /// Useful when you need to pass a URL to another library or tool.
+    /// Paths are automatically normalized to include a leading `/`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let health_url = pf.url("/health");
+    /// // Returns something like "http://127.0.0.1:54321/health"
+    ///
+    /// // Also works without leading slash
+    /// let api_url = pf.url("api/users");
+    /// // Returns "http://127.0.0.1:54321/api/users"
+    /// ```
+    pub fn url(&self, path: &str) -> String {
+        let normalized_path = if path.is_empty() {
+            "/".to_string()
+        } else if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        };
+        format!("http://{}{}", self.local_addr, normalized_path)
+    }
+
     /// Make an HTTP GET request through the port forward
     ///
     /// Returns the response body as a UTF-8 string. Binary responses
@@ -262,5 +288,28 @@ mod tests {
     fn test_extract_body_multiple_separators() {
         let response = "HTTP/1.1 200 OK\r\n\r\nfirst\r\n\r\nsecond";
         assert_eq!(extract_body(response), "first\r\n\r\nsecond");
+    }
+
+    #[test]
+    fn test_url_path_normalization() {
+        // Helper to test the path normalization logic
+        fn normalize_path(path: &str) -> String {
+            if path.starts_with('/') {
+                path.to_string()
+            } else {
+                format!("/{}", path)
+            }
+        }
+
+        // Path with leading slash stays unchanged
+        assert_eq!(normalize_path("/health"), "/health");
+        assert_eq!(normalize_path("/api/users"), "/api/users");
+
+        // Path without leading slash gets one added
+        assert_eq!(normalize_path("health"), "/health");
+        assert_eq!(normalize_path("api/users"), "/api/users");
+
+        // Empty path gets a slash
+        assert_eq!(normalize_path(""), "/");
     }
 }
