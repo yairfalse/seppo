@@ -14,11 +14,13 @@ use k8s_openapi::api::authorization::v1::{
 use k8s_openapi::api::core::v1::{
     Event, Namespace, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
 };
-use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::api::networking::v1::{
     Ingress, NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicySpec,
 };
-use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
+use kube::api::{
+    Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams,
+};
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
 use std::collections::HashMap;
@@ -55,19 +57,31 @@ pub enum ForwardTarget {
 /// - `"pod/worker-0"` → `"worker-0"`
 pub fn extract_resource_name(reference: &str) -> &str {
     // If there's a slash, take everything after it
-    reference.split('/').last().unwrap_or(reference)
+    reference.split('/').next_back().unwrap_or(reference)
 }
 
-/// Create a short hash from label selectors for naming NetworkPolicies
-fn label_hash(labels: &HashMap<String, String>) -> String {
-    let mut parts: Vec<String> = labels.iter().map(|(k, v)| format!("{}{}", k, v)).collect();
-    parts.sort(); // Ensure consistent ordering
-    let joined = parts.join("");
-    if joined.len() > 8 {
-        joined[..8].to_string()
-    } else {
-        joined
+/// Create a deterministic suffix from label selectors for naming NetworkPolicies
+///
+/// Uses a hash function to generate a collision-resistant 8-character hex suffix.
+/// Sorted keys ensure the same labels always produce the same suffix.
+fn label_suffix(labels: &HashMap<String, String>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    // Sort keys for deterministic ordering
+    let mut parts: Vec<(&String, &String)> = labels.iter().collect();
+    parts.sort_by_key(|(k, _)| *k);
+
+    // Hash each key-value pair
+    for (k, v) in parts {
+        k.hash(&mut hasher);
+        v.hash(&mut hasher);
     }
+
+    // Take first 8 hex characters of the hash
+    format!("{:x}", hasher.finish())[..8].to_string()
 }
 
 /// Parse a resource reference like "deployment/myapp" into (kind, name)
@@ -563,6 +577,13 @@ impl Context {
     /// This effectively isolates the selected pods from all network traffic.
     /// Useful for testing network segmentation or simulating network failures.
     ///
+    /// # Cleanup
+    ///
+    /// The NetworkPolicy is created in the context's namespace and will be automatically
+    /// deleted when the namespace is cleaned up via [`cleanup()`](Self::cleanup).
+    /// To remove isolation before cleanup, delete the returned NetworkPolicy using
+    /// [`delete()`](Self::delete) with the policy name from `metadata.name`.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -571,14 +592,17 @@ impl Context {
     /// let mut selector = HashMap::new();
     /// selector.insert("app".to_string(), "isolated".to_string());
     ///
-    /// ctx.isolate(selector).await?;
+    /// let policy = ctx.isolate(selector).await?;
     /// // Pods with label app=isolated are now network-isolated
+    ///
+    /// // To remove isolation early:
+    /// ctx.delete::<NetworkPolicy>(policy.metadata.name.as_ref().unwrap()).await?;
     /// ```
     pub async fn isolate(
         &self,
         selector: HashMap<String, String>,
     ) -> Result<NetworkPolicy, ContextError> {
-        let name = format!("seppo-isolate-{}", label_hash(&selector));
+        let name = format!("seppo-isolate-{}", label_suffix(&selector));
 
         let policy = NetworkPolicy {
             metadata: kube::api::ObjectMeta {
@@ -587,10 +611,12 @@ impl Context {
                 ..Default::default()
             },
             spec: Some(NetworkPolicySpec {
-                pod_selector: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
-                    match_labels: Some(selector.into_iter().collect()),
-                    ..Default::default()
-                }),
+                pod_selector: Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                        match_labels: Some(selector.into_iter().collect()),
+                        ..Default::default()
+                    },
+                ),
                 policy_types: Some(vec!["Ingress".to_string(), "Egress".to_string()]),
                 // Empty ingress/egress means deny all
                 ingress: None,
@@ -630,8 +656,8 @@ impl Context {
     ) -> Result<NetworkPolicy, ContextError> {
         let name = format!(
             "seppo-allow-{}-from-{}",
-            label_hash(&target),
-            label_hash(&source)
+            label_suffix(&target),
+            label_suffix(&source)
         );
 
         let policy = NetworkPolicy {
@@ -641,10 +667,12 @@ impl Context {
                 ..Default::default()
             },
             spec: Some(NetworkPolicySpec {
-                pod_selector: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
-                    match_labels: Some(target.into_iter().collect()),
-                    ..Default::default()
-                }),
+                pod_selector: Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                        match_labels: Some(target.into_iter().collect()),
+                        ..Default::default()
+                    },
+                ),
                 policy_types: Some(vec!["Ingress".to_string()]),
                 ingress: Some(vec![NetworkPolicyIngressRule {
                     from: Some(vec![NetworkPolicyPeer {
@@ -1600,11 +1628,10 @@ impl Context {
                     .map_err(|e| ContextError::GetError(e.to_string()))?;
 
                 // Get deployment UID for owner reference matching
-                let dep_uid = dep
-                    .metadata
-                    .uid
-                    .as_ref()
-                    .ok_or_else(|| ContextError::GetError("deployment has no UID".to_string()))?;
+                let dep_uid =
+                    dep.metadata.uid.as_ref().ok_or_else(|| {
+                        ContextError::GetError("deployment has no UID".to_string())
+                    })?;
 
                 // List all ReplicaSets and filter by owner reference
                 let rs_list = replicasets
@@ -1749,18 +1776,15 @@ impl Context {
 
         match kind {
             ResourceKind::Deployment => {
-                let api: Api<Deployment> =
-                    Api::namespaced(self.client.clone(), &self.namespace);
+                let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
                 restart_workload!(api, name, "deployment")
             }
             ResourceKind::StatefulSet => {
-                let api: Api<StatefulSet> =
-                    Api::namespaced(self.client.clone(), &self.namespace);
+                let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), &self.namespace);
                 restart_workload!(api, name, "statefulset")
             }
             ResourceKind::DaemonSet => {
-                let api: Api<DaemonSet> =
-                    Api::namespaced(self.client.clone(), &self.namespace);
+                let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), &self.namespace);
                 restart_workload!(api, name, "daemonset")
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
@@ -1811,10 +1835,7 @@ impl Context {
             .await
             .map_err(|e| ContextError::GetError(format!("RBAC check failed: {}", e)))?;
 
-        let allowed = result
-            .status
-            .map(|s| s.allowed)
-            .unwrap_or(false);
+        let allowed = result.status.map(|s| s.allowed).unwrap_or(false);
 
         debug!(
             verb = %verb,
@@ -2310,36 +2331,43 @@ impl Context {
 
         let mut backoff = std::time::Duration::from_millis(100);
         let max_backoff = std::time::Duration::from_secs(5);
+        let mut last_error: Option<E> = None;
 
-        for attempt in 0..max_attempts {
+        for attempt in 1..=max_attempts {
             match f().await {
                 Ok(()) => {
-                    debug!(attempt = attempt + 1, "Retry succeeded");
+                    debug!(attempt = attempt, "Retry succeeded");
                     return Ok(());
                 }
                 Err(e) => {
-                    if attempt + 1 >= max_attempts {
+                    let is_last_attempt = attempt == max_attempts;
+
+                    if is_last_attempt {
                         warn!(
-                            attempt = attempt + 1,
+                            attempt = attempt,
                             max_attempts = max_attempts,
                             error = %e,
                             "Retry exhausted all attempts"
                         );
-                        return Err(e);
+                    } else {
+                        debug!(
+                            attempt = attempt,
+                            max_attempts = max_attempts,
+                            backoff = ?backoff,
+                            error = %e,
+                            "Retry attempt failed, backing off"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, max_backoff);
                     }
-                    debug!(
-                        attempt = attempt + 1,
-                        max_attempts = max_attempts,
-                        backoff = ?backoff,
-                        error = %e,
-                        "Retry attempt failed, backing off"
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = std::cmp::min(backoff * 2, max_backoff);
+
+                    last_error = Some(e);
                 }
             }
         }
-        unreachable!()
+
+        // This is reached when all attempts fail
+        Err(last_error.expect("max_attempts > 0 guarantees at least one iteration"))
     }
 
     /// Create a pod assertion builder
@@ -2405,7 +2433,11 @@ impl Context {
     ///     .must();
     /// ```
     pub fn test_ingress(&self, name: &str) -> IngressTest {
-        IngressTest::new(self.client.clone(), self.namespace.clone(), name.to_string())
+        IngressTest::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            name.to_string(),
+        )
     }
 }
 
@@ -2517,18 +2549,15 @@ impl IngressTest {
                         for p in http.paths {
                             // Check path match (None in test means match any)
                             let ingress_path = p.path.as_deref().unwrap_or("");
-                            let path_matches = self
-                                .path
-                                .as_deref()
-                                .map_or(true, |test_path| path_prefix_matches(test_path, ingress_path));
+                            let path_matches = self.path.as_deref().is_none_or(|test_path| {
+                                path_prefix_matches(test_path, ingress_path)
+                            });
 
                             if path_matches {
                                 if let Some(service) = p.backend.service {
                                     let actual_svc = service.name;
-                                    let actual_port = service
-                                        .port
-                                        .and_then(|p| p.number)
-                                        .unwrap_or(0);
+                                    let actual_port =
+                                        service.port.and_then(|p| p.number).unwrap_or(0);
 
                                     if actual_svc == expected_svc && actual_port == port {
                                         found = true;
@@ -2546,11 +2575,7 @@ impl IngressTest {
                 if !found {
                     self.err = Some(format!(
                         "Ingress {} does not route host={:?} path={:?} to {}:{}",
-                        self.name,
-                        self.host,
-                        self.path,
-                        expected_svc,
-                        port
+                        self.name, self.host, self.path, expected_svc, port
                     ));
                 }
             }
@@ -2680,10 +2705,7 @@ impl RBACBuilder {
         let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
         for res in resources {
             let group = api_group_for_resource(res);
-            by_group
-                .entry(group)
-                .or_default()
-                .push(res.to_string());
+            by_group.entry(group).or_default().push(res.to_string());
         }
 
         // Create separate rules for each API group
@@ -2727,8 +2749,10 @@ impl RBACBuilder {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let resource_strings: Vec<String> =
-            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
         let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
         self.add_rule(&["update"], &resource_refs);
         self
@@ -2740,8 +2764,10 @@ impl RBACBuilder {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let resource_strings: Vec<String> =
-            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
         let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
         self.add_rule(&["delete"], &resource_refs);
         self
@@ -2753,8 +2779,10 @@ impl RBACBuilder {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let resource_strings: Vec<String> =
-            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
         let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
         self.add_rule(
             &["get", "list", "watch", "create", "update", "delete"],
@@ -2771,12 +2799,13 @@ impl RBACBuilder {
         IS: IntoIterator<Item = VS>,
         VS: AsRef<str>,
     {
-        let verb_strings: Vec<String> =
-            verbs.into_iter().map(|v| v.as_ref().to_string()).collect();
+        let verb_strings: Vec<String> = verbs.into_iter().map(|v| v.as_ref().to_string()).collect();
         let verb_refs: Vec<&str> = verb_strings.iter().map(|s| s.as_str()).collect();
 
-        let resource_strings: Vec<String> =
-            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_strings: Vec<String> = resources
+            .into_iter()
+            .map(|r| r.as_ref().to_string())
+            .collect();
         let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
 
         self.add_rule(&verb_refs, &resource_refs);
@@ -2804,10 +2833,7 @@ impl RBACBuilder {
                     .map(|r| r.as_ref().to_string())
                     .collect(),
             ),
-            verbs: verbs
-                .into_iter()
-                .map(|v| v.as_ref().to_string())
-                .collect(),
+            verbs: verbs.into_iter().map(|v| v.as_ref().to_string()).collect(),
             ..Default::default()
         });
         self
@@ -2855,14 +2881,24 @@ impl RBACBuilder {
 fn api_group_for_resource(resource: &str) -> String {
     match resource {
         // Core API group ("")
-        "pods" | "services" | "configmaps" | "secrets" | "persistentvolumeclaims"
-        | "serviceaccounts" | "namespaces" | "nodes" | "events" | "endpoints"
-        | "persistentvolumes" | "replicationcontrollers" | "resourcequotas" | "limitranges" => {
-            String::new()
-        }
+        "pods"
+        | "services"
+        | "configmaps"
+        | "secrets"
+        | "persistentvolumeclaims"
+        | "serviceaccounts"
+        | "namespaces"
+        | "nodes"
+        | "events"
+        | "endpoints"
+        | "persistentvolumes"
+        | "replicationcontrollers"
+        | "resourcequotas"
+        | "limitranges" => String::new(),
         // apps group
-        "deployments" | "statefulsets" | "daemonsets" | "replicasets"
-        | "controllerrevisions" => "apps".to_string(),
+        "deployments" | "statefulsets" | "daemonsets" | "replicasets" | "controllerrevisions" => {
+            "apps".to_string()
+        }
         // batch group
         "jobs" | "cronjobs" => "batch".to_string(),
         // networking.k8s.io group
@@ -2896,7 +2932,10 @@ mod tests {
 
         // Kind/name format - should extract just the name
         assert_eq!(extract_resource_name("deployment/myapp"), "myapp");
-        assert_eq!(extract_resource_name("gateway/test-gateway"), "test-gateway");
+        assert_eq!(
+            extract_resource_name("gateway/test-gateway"),
+            "test-gateway"
+        );
         assert_eq!(extract_resource_name("pod/worker-0"), "worker-0");
         assert_eq!(extract_resource_name("configmap/my-config"), "my-config");
 
@@ -3152,11 +3191,13 @@ mod tests {
         assert_eq!(secret.metadata.name.as_deref(), Some("file-secret"));
         let data = secret.data.expect("Should have data");
         assert_eq!(
-            data.get("config").map(|b| String::from_utf8_lossy(&b.0).to_string()),
+            data.get("config")
+                .map(|b| String::from_utf8_lossy(&b.0).to_string()),
             Some("config-content".to_string())
         );
         assert_eq!(
-            data.get("data").map(|b| String::from_utf8_lossy(&b.0).to_string()),
+            data.get("data")
+                .map(|b| String::from_utf8_lossy(&b.0).to_string()),
             Some("data-content".to_string())
         );
 
@@ -3179,10 +3220,16 @@ mod tests {
         let cert_file = temp_dir.join("seppo_test_cert.pem");
         let key_file = temp_dir.join("seppo_test_key.pem");
 
-        std::fs::write(&cert_file, "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----")
-            .expect("Should write cert");
-        std::fs::write(&key_file, "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----")
-            .expect("Should write key");
+        std::fs::write(
+            &cert_file,
+            "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+        )
+        .expect("Should write cert");
+        std::fs::write(
+            &key_file,
+            "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+        )
+        .expect("Should write key");
 
         // Create TLS secret
         let secret = ctx
@@ -3225,12 +3272,23 @@ mod tests {
             .expect("Should create NetworkPolicy");
 
         // Verify policy was created
-        assert!(policy.metadata.name.as_ref().unwrap().starts_with("seppo-isolate-"));
+        assert!(policy
+            .metadata
+            .name
+            .as_ref()
+            .unwrap()
+            .starts_with("seppo-isolate-"));
 
         // Verify it's a deny-all (empty ingress/egress)
         let spec = policy.spec.expect("Should have spec");
-        assert!(spec.ingress.is_none(), "Should have no ingress rules (deny all)");
-        assert!(spec.egress.is_none(), "Should have no egress rules (deny all)");
+        assert!(
+            spec.ingress.is_none(),
+            "Should have no ingress rules (deny all)"
+        );
+        assert!(
+            spec.egress.is_none(),
+            "Should have no egress rules (deny all)"
+        );
 
         // Cleanup
         ctx.cleanup().await.expect("Should cleanup");
@@ -3254,7 +3312,12 @@ mod tests {
             .expect("Should create NetworkPolicy");
 
         // Verify policy was created
-        assert!(policy.metadata.name.as_ref().unwrap().starts_with("seppo-allow-"));
+        assert!(policy
+            .metadata
+            .name
+            .as_ref()
+            .unwrap()
+            .starts_with("seppo-allow-"));
 
         // Verify it has ingress rules
         let spec = policy.spec.expect("Should have spec");
@@ -3430,9 +3493,14 @@ mod tests {
                 access_modes: Some(vec!["ReadWriteOnce".to_string()]),
                 resources: Some(k8s_openapi::api::core::v1::VolumeResourceRequirements {
                     requests: Some(
-                        [("storage".to_string(), k8s_openapi::apimachinery::pkg::api::resource::Quantity("1Gi".to_string()))]
-                            .into_iter()
-                            .collect(),
+                        [(
+                            "storage".to_string(),
+                            k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                                "1Gi".to_string(),
+                            ),
+                        )]
+                        .into_iter()
+                        .collect(),
                     ),
                     ..Default::default()
                 }),
@@ -3460,7 +3528,10 @@ mod tests {
             }
             Err(e) => {
                 // Expected if no dynamic provisioning is available
-                println!("wait_pvc_bound returned error (expected if no dynamic provisioning): {}", e);
+                println!(
+                    "wait_pvc_bound returned error (expected if no dynamic provisioning): {}",
+                    e
+                );
             }
         }
 
@@ -3623,26 +3694,20 @@ mod tests {
 
         let mut lines = Vec::new();
         // Collect a few lines with a timeout
-        let collect_result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            async {
-                while let Some(line) = stream.try_next().await? {
-                    lines.push(line);
-                    if lines.len() >= 3 {
-                        break;
-                    }
+        let collect_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(line) = stream.try_next().await? {
+                lines.push(line);
+                if lines.len() >= 3 {
+                    break;
                 }
-                Ok::<_, std::io::Error>(())
-            },
-        )
+            }
+            Ok::<_, std::io::Error>(())
+        })
         .await;
 
+        assert!(collect_result.is_ok(), "Should collect logs within timeout");
         assert!(
-            collect_result.is_ok(),
-            "Should collect logs within timeout"
-        );
-        assert!(
-            lines.len() >= 1,
+            !lines.is_empty(),
             "Should have received at least one log line"
         );
         assert!(
@@ -4955,7 +5020,9 @@ mod tests {
         };
 
         ctx.apply(&deployment).await.expect("Should apply");
-        ctx.wait_ready("deployment/logs-test").await.expect("Should be ready");
+        ctx.wait_ready("deployment/logs-test")
+            .await
+            .expect("Should be ready");
 
         // Get logs from all pods with label app=logs-test
         let all_logs = ctx
@@ -4967,9 +5034,202 @@ mod tests {
         assert_eq!(all_logs.len(), 2, "Should have logs from 2 pods");
 
         // Each pod should have the expected log message
-        for (_pod_name, logs) in &all_logs {
-            assert!(logs.contains("hello from pod"), "Each pod should have the log message");
+        for logs in all_logs.values() {
+            assert!(
+                logs.contains("hello from pod"),
+                "Each pod should have the log message"
+            );
         }
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that can_i() checks RBAC permissions
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_context_can_i() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Test permission to create pods - should be allowed in our namespace
+        let can_create_pods = ctx
+            .can_i("create", "pods")
+            .await
+            .expect("Should check permission");
+
+        // The test runs with cluster-admin typically, so this should be true
+        // In a real environment with limited permissions, this might be false
+        assert!(
+            can_create_pods,
+            "Should be able to create pods in test namespace"
+        );
+
+        // Test permission to get pods - should be allowed
+        let can_get_pods = ctx
+            .can_i("get", "pods")
+            .await
+            .expect("Should check permission");
+
+        assert!(can_get_pods, "Should be able to get pods in test namespace");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that RBACBuilder creates correct ServiceAccount, Role, and RoleBinding
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_rbac_builder() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Build an RBAC bundle
+        let bundle = RBACBuilder::service_account("test-sa")
+            .can_get(&["pods", "services"])
+            .can_list(&["pods"])
+            .can_create(&["configmaps"])
+            .build();
+
+        // Verify ServiceAccount was built correctly
+        assert_eq!(
+            bundle.service_account.metadata.name.as_deref(),
+            Some("test-sa")
+        );
+
+        // Verify Role was built correctly with correct name
+        assert_eq!(bundle.role.metadata.name.as_deref(), Some("test-sa-role"));
+
+        // Verify Role has the expected rules
+        let rules = bundle.role.rules.as_ref().expect("Should have rules");
+        assert!(
+            rules.len() >= 2,
+            "Should have at least 2 rules (core API resources)"
+        );
+
+        // Verify RoleBinding was built correctly
+        assert_eq!(
+            bundle.role_binding.metadata.name.as_deref(),
+            Some("test-sa-binding")
+        );
+        assert_eq!(bundle.role_binding.role_ref.name, "test-sa-role");
+
+        // Apply the RBAC bundle
+        ctx.apply_rbac(&bundle)
+            .await
+            .expect("Should apply RBAC bundle");
+
+        // Verify resources were created by getting them
+        use k8s_openapi::api::core::v1::ServiceAccount;
+        let sa: ServiceAccount = ctx.get("test-sa").await.expect("Should get ServiceAccount");
+        assert_eq!(sa.metadata.name.as_deref(), Some("test-sa"));
+
+        let role: Role = ctx.get("test-sa-role").await.expect("Should get Role");
+        assert!(role.rules.is_some());
+
+        let rb: RoleBinding = ctx
+            .get("test-sa-binding")
+            .await
+            .expect("Should get RoleBinding");
+        assert_eq!(rb.role_ref.name, "test-sa-role");
+
+        ctx.cleanup().await.expect("Should cleanup");
+    }
+
+    /// Test that test_ingress() creates a fluent builder for Ingress assertions
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_ingress_builder() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // Create an Ingress resource
+        let ingress = Ingress {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-ingress".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::networking::v1::IngressSpec {
+                rules: Some(vec![k8s_openapi::api::networking::v1::IngressRule {
+                    host: Some("example.com".to_string()),
+                    http: Some(k8s_openapi::api::networking::v1::HTTPIngressRuleValue {
+                        paths: vec![k8s_openapi::api::networking::v1::HTTPIngressPath {
+                            path: Some("/api".to_string()),
+                            path_type: "Prefix".to_string(),
+                            backend: k8s_openapi::api::networking::v1::IngressBackend {
+                                service: Some(
+                                    k8s_openapi::api::networking::v1::IngressServiceBackend {
+                                        name: "backend-svc".to_string(),
+                                        port: Some(
+                                            k8s_openapi::api::networking::v1::ServiceBackendPort {
+                                                number: Some(8080),
+                                                ..Default::default()
+                                            },
+                                        ),
+                                    },
+                                ),
+                                ..Default::default()
+                            },
+                        }],
+                    }),
+                }]),
+                tls: Some(vec![k8s_openapi::api::networking::v1::IngressTLS {
+                    hosts: Some(vec!["example.com".to_string()]),
+                    secret_name: Some("tls-secret".to_string()),
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ctx.apply(&ingress).await.expect("Should apply Ingress");
+
+        // Test that expect_backend assertion passes
+        let test_result = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .path("/api")
+            .expect_backend("backend-svc", 8080)
+            .await;
+
+        assert!(
+            test_result.error().is_none(),
+            "expect_backend should pass: {:?}",
+            test_result.error()
+        );
+
+        // Test that expect_tls assertion passes
+        let tls_result = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .expect_tls("tls-secret")
+            .await;
+
+        assert!(
+            tls_result.error().is_none(),
+            "expect_tls should pass: {:?}",
+            tls_result.error()
+        );
+
+        // Test that wrong backend fails assertion
+        let wrong_backend = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .path("/api")
+            .expect_backend("wrong-svc", 8080)
+            .await;
+
+        assert!(
+            wrong_backend.error().is_some(),
+            "expect_backend should fail for wrong service"
+        );
+
+        // Test that wrong TLS secret fails assertion
+        let wrong_tls = ctx
+            .test_ingress("test-ingress")
+            .host("example.com")
+            .expect_tls("wrong-secret")
+            .await;
+
+        assert!(
+            wrong_tls.error().is_some(),
+            "expect_tls should fail for wrong secret"
+        );
 
         ctx.cleanup().await.expect("Should cleanup");
     }
