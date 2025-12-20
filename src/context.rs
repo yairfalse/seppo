@@ -2722,38 +2722,92 @@ impl RBACBuilder {
     }
 
     /// Add update permission for the specified resources
-    pub fn can_update(mut self, resources: &[&str]) -> Self {
-        self.add_rule(&["update"], resources);
+    pub fn can_update<I, S>(mut self, resources: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let resource_strings: Vec<String> =
+            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        self.add_rule(&["update"], &resource_refs);
         self
     }
 
     /// Add delete permission for the specified resources
-    pub fn can_delete(mut self, resources: &[&str]) -> Self {
-        self.add_rule(&["delete"], resources);
+    pub fn can_delete<I, S>(mut self, resources: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let resource_strings: Vec<String> =
+            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        self.add_rule(&["delete"], &resource_refs);
         self
     }
 
     /// Add all permissions (get, list, watch, create, update, delete) for resources
-    pub fn can_all(mut self, resources: &[&str]) -> Self {
+    pub fn can_all<I, S>(mut self, resources: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let resource_strings: Vec<String> =
+            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
         self.add_rule(
             &["get", "list", "watch", "create", "update", "delete"],
-            resources,
+            &resource_refs,
         );
         self
     }
 
     /// Add custom verbs for the specified resources
-    pub fn can(mut self, verbs: &[&str], resources: &[&str]) -> Self {
-        self.add_rule(verbs, resources);
+    pub fn can<IV, IS, VV, VS>(mut self, verbs: IV, resources: IS) -> Self
+    where
+        IV: IntoIterator<Item = VV>,
+        VV: AsRef<str>,
+        IS: IntoIterator<Item = VS>,
+        VS: AsRef<str>,
+    {
+        let verb_strings: Vec<String> =
+            verbs.into_iter().map(|v| v.as_ref().to_string()).collect();
+        let verb_refs: Vec<&str> = verb_strings.iter().map(|s| s.as_str()).collect();
+
+        let resource_strings: Vec<String> =
+            resources.into_iter().map(|r| r.as_ref().to_string()).collect();
+        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+
+        self.add_rule(&verb_refs, &resource_refs);
         self
     }
 
     /// Add a rule with explicit API group for custom resources (CRDs)
-    pub fn for_api_group(mut self, api_group: &str, verbs: &[&str], resources: &[&str]) -> Self {
+    pub fn for_api_group<IV, VV, IR, VR>(
+        mut self,
+        api_group: &str,
+        verbs: IV,
+        resources: IR,
+    ) -> Self
+    where
+        IV: IntoIterator<Item = VV>,
+        VV: AsRef<str>,
+        IR: IntoIterator<Item = VR>,
+        VR: AsRef<str>,
+    {
         self.rules.push(PolicyRule {
             api_groups: Some(vec![api_group.to_string()]),
-            resources: Some(resources.iter().map(|r| r.to_string()).collect()),
-            verbs: verbs.iter().map(|v| v.to_string()).collect(),
+            resources: Some(
+                resources
+                    .into_iter()
+                    .map(|r| r.as_ref().to_string())
+                    .collect(),
+            ),
+            verbs: verbs
+                .into_iter()
+                .map(|v| v.as_ref().to_string())
+                .collect(),
             ..Default::default()
         });
         self
