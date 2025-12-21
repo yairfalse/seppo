@@ -2059,6 +2059,11 @@ impl Context {
     /// Opens a local port that tunnels traffic to the specified pod port.
     /// Returns a `PortForward` that can be used to make HTTP requests.
     ///
+    /// # Deprecated
+    ///
+    /// Use [`port_forward`](Self::port_forward) instead, which supports
+    /// kubectl-style resource references like `svc/name` and `deployment/name`.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -2066,12 +2071,13 @@ impl Context {
     /// let response = pf.get("/health").await?;
     /// assert!(response.contains("ok"));
     /// ```
+    #[deprecated(since = "0.2.0", note = "Use port_forward() instead")]
     pub async fn forward(
         &self,
         pod_name: &str,
         port: u16,
     ) -> Result<PortForward, PortForwardError> {
-        PortForward::new(self.client.clone(), &self.namespace, pod_name, port).await
+        self.port_forward(pod_name, port).await
     }
 
     /// Create a port forward using kubectl-style resource references
@@ -2086,16 +2092,16 @@ impl Context {
     ///
     /// ```ignore
     /// // Forward to a service
-    /// let pf = ctx.forward_to("svc/myapp", 8080).await?;
+    /// let pf = ctx.port_forward("svc/myapp", 8080).await?;
     ///
     /// // Forward to a deployment
-    /// let pf = ctx.forward_to("deployment/backend", 3000).await?;
+    /// let pf = ctx.port_forward("deployment/backend", 3000).await?;
     ///
     /// // Forward to a pod (explicit or bare name)
-    /// let pf = ctx.forward_to("pod/worker-0", 9000).await?;
-    /// let pf = ctx.forward_to("worker-0", 9000).await?;
+    /// let pf = ctx.port_forward("pod/worker-0", 9000).await?;
+    /// let pf = ctx.port_forward("worker-0", 9000).await?;
     /// ```
-    pub async fn forward_to(
+    pub async fn port_forward(
         &self,
         target: &str,
         port: u16,
@@ -2123,7 +2129,21 @@ impl Context {
             "Creating port forward"
         );
 
-        self.forward(&pod_name, port).await
+        PortForward::new(self.client.clone(), &self.namespace, &pod_name, port).await
+    }
+
+    /// Create a port forward using kubectl-style resource references
+    ///
+    /// # Deprecated
+    ///
+    /// Use [`port_forward`](Self::port_forward) instead.
+    #[deprecated(since = "0.2.0", note = "Use port_forward() instead")]
+    pub async fn forward_to(
+        &self,
+        target: &str,
+        port: u16,
+    ) -> Result<PortForward, PortForwardError> {
+        self.port_forward(target, port).await
     }
 
     /// Find a running pod backing a service
@@ -2942,6 +2962,19 @@ mod tests {
         // Edge cases
         assert_eq!(extract_resource_name(""), "");
         assert_eq!(extract_resource_name("a/b/c"), "c"); // Multiple slashes: takes last part
+    }
+
+    /// RED: Test that port_forward() method exists and has correct signature
+    #[tokio::test]
+    #[ignore] // Requires real cluster
+    async fn test_port_forward_exists() {
+        let ctx = Context::new().await.expect("Should create context");
+
+        // port_forward should accept any target format (pod name, svc/name, etc)
+        // and return Result<PortForward, PortForwardError>
+        let _result = ctx.port_forward("test-pod", 8080).await;
+
+        ctx.cleanup().await.expect("Should cleanup");
     }
 
     #[tokio::test]
@@ -3881,10 +3914,10 @@ mod tests {
         ctx.cleanup().await.expect("Should cleanup");
     }
 
-    /// Test that forward() creates a port forward to a pod
+    /// Test that port_forward() creates a port forward to a pod
     #[tokio::test]
     #[ignore] // Requires real cluster
-    async fn test_context_forward() {
+    async fn test_context_port_forward() {
         let ctx = Context::new().await.expect("Should create context");
 
         // Create a simple nginx pod
@@ -3922,7 +3955,7 @@ mod tests {
 
         // Create port forward
         let pf = ctx
-            .forward("forward-test", 80)
+            .port_forward("forward-test", 80)
             .await
             .expect("Should create port forward");
 
@@ -4408,7 +4441,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Requires real cluster
-    async fn test_forward_to_pod() {
+    async fn test_port_forward_to_pod() {
         let ctx = Context::new().await.expect("Should create context");
 
         // Create a pod with nginx
@@ -4446,7 +4479,7 @@ mod tests {
 
         // Forward using pod/ prefix
         let pf = ctx
-            .forward_to("pod/forward-pod-test", 80)
+            .port_forward("pod/forward-pod-test", 80)
             .await
             .expect("Should create port forward");
 
@@ -4458,7 +4491,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Requires real cluster
-    async fn test_forward_to_service() {
+    async fn test_port_forward_to_service() {
         use crate::stack::Stack;
 
         let ctx = Context::new().await.expect("Should create context");
@@ -4486,7 +4519,7 @@ mod tests {
 
         // Forward using svc/ prefix - should find a backing pod
         let pf = ctx
-            .forward_to("svc/forward-svc-test", 80)
+            .port_forward("svc/forward-svc-test", 80)
             .await
             .expect("Should create port forward to service");
 

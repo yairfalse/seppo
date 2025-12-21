@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.apply(&my_deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    let pf = ctx.forward_to("svc/myapp", 8080).await?;
+    let pf = ctx.port_forward("svc/myapp", 8080).await?;
     let resp = pf.get("/health").await?;
 
     ctx.cleanup().await?;
@@ -34,7 +34,7 @@ async fn test_my_app(ctx: Context) {
     ctx.apply(&my_deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    let resp = ctx.forward_to("svc/myapp", 8080).await?.get("/health").await?;
+    let resp = ctx.port_forward("svc/myapp", 8080).await?.get("/health").await?;
     assert!(resp.contains("ok"));
 }
 ```
@@ -103,8 +103,7 @@ impl Context {
     pub async fn events(&self) -> Result<Vec<Event>>;
 
     // Network
-    pub async fn forward(&self, pod: &str, port: u16) -> Result<PortForward, PortForwardError>;
-    pub async fn forward_to(&self, target: &str, port: u16) -> Result<PortForward, PortForwardError>;
+    pub async fn port_forward(&self, target: &str, port: u16) -> Result<PortForward, PortForwardError>;
     pub async fn exec(&self, pod: &str, cmd: &[&str]) -> Result<String>;
 
     // Stack deployment

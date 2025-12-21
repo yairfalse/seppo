@@ -66,7 +66,6 @@ pub mod diagnostics;
 pub mod environment;
 pub mod eventually;
 pub mod fixtures;
-pub mod metrics;
 pub mod portforward;
 pub mod provider;
 pub mod runner;
@@ -90,14 +89,13 @@ pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
 pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};
 pub use fixtures::{DeploymentFixture, PodFixture, ServiceFixture};
-pub use metrics::{metrics, SeppoMetrics};
 pub use portforward::{PortForward, PortForwardError};
 pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
 };
 pub use runner::{run, run_with_env, RunResult, RunnerError};
 pub use stack::{ServiceBuilder, Stack, StackError};
-pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
+pub use telemetry::init_logging;
 pub use traffic::{HttpAssert, RequestRecord, TrafficError, TrafficRecorder};
 pub use wait::{ResourceState, WaitError, WaitEvent};
 

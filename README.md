@@ -60,7 +60,7 @@ The goal: you should never need to write YAML again.
          │                       ├── get/list()   → read resources
          │                       ├── delete()     → remove resources
          │                       ├── wait_ready() → poll until ready
-         │                       ├── forward()    → port forward
+         │                       ├── port_forward() → port forward
          │                       ├── exec()       → run commands
          │                       └── logs()       → stream logs
 ```
@@ -111,7 +111,7 @@ async fn test_my_app(ctx: Context) {
     ctx.apply(&deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    let pf = ctx.forward_to("svc/myapp", 8080).await?;
+    let pf = ctx.port_forward("svc/myapp", 8080).await?;
     assert!(pf.get("/health").await?.contains("ok"));
 }
 // Cleanup automatic on success, diagnostics on failure
