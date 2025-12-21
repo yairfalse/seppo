@@ -2438,6 +2438,23 @@ impl Context {
         )
     }
 
+    /// Create a PVC assertion builder
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.assert_pvc("my-data").is_bound().await?;
+    /// ctx.assert_pvc("my-data").has_storage_class("standard").await?;
+    /// ctx.assert_pvc("my-data").has_capacity("10Gi").await?;
+    /// ```
+    pub fn assert_pvc(&self, name: &str) -> crate::assertions::PvcAssertion {
+        crate::assertions::PvcAssertion::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            name.to_string(),
+        )
+    }
+
     /// Start an Ingress test chain
     ///
     /// Provides fluent assertions for testing Ingress resources.

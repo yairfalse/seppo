@@ -75,7 +75,9 @@ pub mod traffic;
 pub mod wait;
 
 // Re-export commonly used types
-pub use assertions::{AssertionError, DeploymentAssertion, PodAssertion, ServiceAssertion};
+pub use assertions::{
+    AssertionError, DeploymentAssertion, PodAssertion, PvcAssertion, ServiceAssertion,
+};
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
 pub use context::{
