@@ -126,7 +126,7 @@ async fn test_my_controller(ctx: Context) {
 ### 3. `Stack` - Environment Builder
 
 ```rust
-let stack = Stack::new()
+let s = stack()
     .service("frontend")
         .image("fe:test")
         .replicas(4)
@@ -137,20 +137,26 @@ let stack = Stack::new()
         .port(8080)
     .build();
 
-ctx.up(&stack).await?;
+ctx.up(&s).await?;
 ```
 
 ### 4. Fixtures - Resource Builders
 
 ```rust
-let deployment = DeploymentFixture::new("myapp")
+// Builder function style (recommended)
+let deploy = deployment("myapp")
     .image("nginx:latest")
     .replicas(3)
     .port(80)
     .env("LOG_LEVEL", "debug")
     .build();
 
-ctx.apply(&deployment).await?;
+ctx.apply(&deploy).await?;
+
+// Struct style also works
+let pod = PodFixture::new("worker")
+    .image("busybox")
+    .build();
 ```
 
 ### 5. Failure Handling (with test macro)

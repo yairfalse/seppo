@@ -120,9 +120,9 @@ async fn test_my_app(ctx: Context) {
 ### Resource Builders
 
 ```rust
-use seppo::DeploymentFixture;
+use seppo::deployment;
 
-let deployment = DeploymentFixture::new("myapp")
+let deploy = deployment("myapp")
     .image("nginx:latest")
     .replicas(3)
     .port(80)
@@ -130,15 +130,15 @@ let deployment = DeploymentFixture::new("myapp")
     .label("tier", "frontend")
     .build();
 
-ctx.apply(&deployment).await?;
+ctx.apply(&deploy).await?;
 ```
 
 ### Deploy Stacks
 
 ```rust
-use seppo::Stack;
+use seppo::stack;
 
-let stack = Stack::new()
+let s = stack()
     .service("frontend")
         .image("fe:v1")
         .replicas(2)
@@ -152,7 +152,7 @@ let stack = Stack::new()
         .port(5432)
     .build();
 
-ctx.up(&stack).await?;
+ctx.up(&s).await?;
 ```
 
 ### Async Conditions

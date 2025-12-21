@@ -154,6 +154,25 @@ impl Stack {
     }
 }
 
+/// Create a new stack builder
+///
+/// Shorthand for `Stack::new()`, aligning with ilmari's Go API.
+///
+/// # Example
+///
+/// ```ignore
+/// use seppo::stack;
+///
+/// let s = stack()
+///     .service("api")
+///     .image("nginx:latest")
+///     .port(80)
+///     .build();
+/// ```
+pub fn stack() -> Stack {
+    Stack::new()
+}
+
 /// Builder for configuring a service within a stack
 #[derive(Debug, Clone)]
 pub struct ServiceBuilder {
@@ -294,5 +313,19 @@ mod tests {
         let k8s_svc = stack.service_for(svc_def, "test-ns");
 
         assert!(k8s_svc.is_none()); // No service created without port
+    }
+
+    #[test]
+    fn test_stack_builder_function() {
+        // Test the lowercase stack() function
+        let s = stack()
+            .service("api")
+            .image("nginx:latest")
+            .port(80)
+            .build();
+
+        assert_eq!(s.services().len(), 1);
+        assert_eq!(s.services()[0].name, "api");
+        assert_eq!(s.services()[0].image, "nginx:latest");
     }
 }
