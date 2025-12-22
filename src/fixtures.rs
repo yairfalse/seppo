@@ -440,6 +440,64 @@ impl ServiceFixture {
     }
 }
 
+// ============================================================
+// Builder functions (ilmari parity)
+// ============================================================
+
+/// Create a deployment builder
+///
+/// Shorthand for `DeploymentFixture::new()`, aligning with ilmari's Go API.
+///
+/// # Example
+///
+/// ```ignore
+/// use seppo::deployment;
+///
+/// let deploy = deployment("api")
+///     .image("nginx:latest")
+///     .replicas(3)
+///     .build();
+/// ```
+pub fn deployment(name: &str) -> DeploymentFixture {
+    DeploymentFixture::new(name)
+}
+
+/// Create a pod builder
+///
+/// Shorthand for `PodFixture::new()`, aligning with ilmari's Go API.
+///
+/// # Example
+///
+/// ```ignore
+/// use seppo::pod;
+///
+/// let p = pod("worker")
+///     .image("busybox")
+///     .command(&["sleep", "infinity"])
+///     .build();
+/// ```
+pub fn pod(name: &str) -> PodFixture {
+    PodFixture::new(name)
+}
+
+/// Create a service builder
+///
+/// Shorthand for `ServiceFixture::new()`, aligning with ilmari's Go API.
+///
+/// # Example
+///
+/// ```ignore
+/// use seppo::service;
+///
+/// let svc = service("api")
+///     .selector("app", "api")
+///     .port(80, 8080)
+///     .build();
+/// ```
+pub fn service(name: &str) -> ServiceFixture {
+    ServiceFixture::new(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,5 +802,45 @@ mod tests {
         let ports = service.spec.as_ref().unwrap().ports.as_ref().unwrap();
         assert_eq!(ports[0].port, 1);
         assert_eq!(ports[1].port, 65535);
+    }
+
+    // ============================================================
+    // Builder function tests (ilmari parity)
+    // ============================================================
+
+    #[test]
+    fn test_deployment_builder_function() {
+        // Test the lowercase deployment() function
+        let deploy = deployment("api").image("nginx:latest").build();
+
+        assert_eq!(deploy.metadata.name, Some("api".to_string()));
+        let container = &deploy
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+        assert_eq!(container.image, Some("nginx:latest".to_string()));
+    }
+
+    #[test]
+    fn test_pod_builder_function() {
+        // Test the lowercase pod() function
+        let p = pod("worker").image("busybox").build();
+
+        assert_eq!(p.metadata.name, Some("worker".to_string()));
+        let container = &p.spec.as_ref().unwrap().containers[0];
+        assert_eq!(container.image, Some("busybox".to_string()));
+    }
+
+    #[test]
+    fn test_service_builder_function() {
+        // Test the lowercase service() function
+        let svc = service("api").selector("app", "api").port(80, 8080).build();
+
+        assert_eq!(svc.metadata.name, Some("api".to_string()));
     }
 }

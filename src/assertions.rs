@@ -17,10 +17,15 @@
 //!
 //! // Assert service state
 //! ctx.assert_service("my-svc").has_port(8080).await?;
+//!
+//! // Assert PVC state
+//! ctx.assert_pvc("my-data").is_bound().await?;
+//! ctx.assert_pvc("my-data").has_storage_class("standard").await?;
+//! ctx.assert_pvc("my-data").has_capacity("10Gi").await?;
 //! ```
 
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Pod, Service};
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, Service};
 use kube::api::Api;
 use kube::Client;
 
@@ -53,6 +58,13 @@ pub struct DeploymentAssertion {
 
 /// Service assertion builder
 pub struct ServiceAssertion {
+    client: Client,
+    namespace: String,
+    name: String,
+}
+
+/// PVC assertion builder
+pub struct PvcAssertion {
     client: Client,
     namespace: String,
     name: String,
@@ -415,6 +427,99 @@ impl ServiceAssertion {
     }
 }
 
+impl PvcAssertion {
+    pub(crate) fn new(client: Client, namespace: String, name: String) -> Self {
+        Self {
+            client,
+            namespace,
+            name,
+        }
+    }
+
+    async fn get_pvc(&self) -> Result<PersistentVolumeClaim, AssertionError> {
+        let pvcs: Api<PersistentVolumeClaim> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+        pvcs.get(&self.name).await.map_err(|e| match e {
+            kube::Error::Api(ae) if ae.code == 404 => {
+                AssertionError::NotFound(format!("pvc/{}", self.name))
+            }
+            _ => AssertionError::KubeError(e.to_string()),
+        })
+    }
+
+    /// Assert the PVC is bound
+    pub async fn is_bound(&self) -> Result<(), AssertionError> {
+        let pvc = self.get_pvc().await?;
+        let phase = pvc
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+
+        if phase == "Bound" {
+            Ok(())
+        } else {
+            Err(AssertionError::Failed {
+                message: format!("expected pvc/{} to be Bound, got {}", self.name, phase),
+            })
+        }
+    }
+
+    /// Assert the PVC has a specific storage class
+    pub async fn has_storage_class(&self, storage_class: &str) -> Result<(), AssertionError> {
+        let pvc = self.get_pvc().await?;
+        let sc = pvc
+            .spec
+            .as_ref()
+            .and_then(|s| s.storage_class_name.as_ref())
+            .map(|s| s.as_str());
+
+        match sc {
+            Some(sc) if sc == storage_class => Ok(()),
+            Some(sc) => Err(AssertionError::Failed {
+                message: format!(
+                    "expected pvc/{} to have storage class {}, got {}",
+                    self.name, storage_class, sc
+                ),
+            }),
+            None => Err(AssertionError::Failed {
+                message: format!("pvc/{} has no storage class defined", self.name),
+            }),
+        }
+    }
+
+    /// Assert the PVC has a specific capacity
+    pub async fn has_capacity(&self, capacity: &str) -> Result<(), AssertionError> {
+        let pvc = self.get_pvc().await?;
+        let actual_capacity = pvc
+            .status
+            .as_ref()
+            .and_then(|s| s.capacity.as_ref())
+            .and_then(|c| c.get("storage"))
+            .map(|q| q.0.clone());
+
+        match actual_capacity {
+            Some(ref c) if c == capacity => Ok(()),
+            Some(ref c) => Err(AssertionError::Failed {
+                message: format!(
+                    "expected pvc/{} to have capacity {}, got {}",
+                    self.name, capacity, c
+                ),
+            }),
+            None => Err(AssertionError::Failed {
+                message: format!("pvc/{} has no capacity set", self.name),
+            }),
+        }
+    }
+
+    /// Assert the PVC exists (convenience method)
+    pub async fn exists(&self) -> Result<(), AssertionError> {
+        self.get_pvc().await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +870,53 @@ mod tests {
         assert!(err.to_string().contains("sidecar"));
         assert!(err.to_string().contains("pod/my-pod"));
         assert!(err.to_string().contains("not ready"));
+    }
+
+    // ============================================================
+    // PVC assertion tests
+    // ============================================================
+
+    #[test]
+    fn test_pvc_bound_error_message() {
+        let name = "my-data";
+        let phase = "Pending";
+        let err = AssertionError::Failed {
+            message: format!("expected pvc/{} to be Bound, got {}", name, phase),
+        };
+        assert!(err.to_string().contains("pvc/my-data"));
+        assert!(err.to_string().contains("Bound"));
+        assert!(err.to_string().contains("Pending"));
+    }
+
+    #[test]
+    fn test_pvc_storage_class_error_message() {
+        let name = "my-data";
+        let expected = "fast";
+        let actual = "slow";
+        let err = AssertionError::Failed {
+            message: format!(
+                "expected pvc/{} to have storage class {}, got {}",
+                name, expected, actual
+            ),
+        };
+        assert!(err.to_string().contains("pvc/my-data"));
+        assert!(err.to_string().contains("fast"));
+        assert!(err.to_string().contains("slow"));
+    }
+
+    #[test]
+    fn test_pvc_capacity_error_message() {
+        let name = "my-data";
+        let expected = "10Gi";
+        let actual = "5Gi";
+        let err = AssertionError::Failed {
+            message: format!(
+                "expected pvc/{} to have capacity {}, got {}",
+                name, expected, actual
+            ),
+        };
+        assert!(err.to_string().contains("pvc/my-data"));
+        assert!(err.to_string().contains("10Gi"));
+        assert!(err.to_string().contains("5Gi"));
     }
 }

@@ -76,7 +76,9 @@ pub mod traffic;
 pub mod wait;
 
 // Re-export commonly used types
-pub use assertions::{AssertionError, DeploymentAssertion, PodAssertion, ServiceAssertion};
+pub use assertions::{
+    AssertionError, DeploymentAssertion, PodAssertion, PvcAssertion, ServiceAssertion,
+};
 pub use cluster::{create, delete, load_image};
 pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
 pub use context::{
@@ -88,16 +90,16 @@ pub use context::{
 pub use context::TestContext;
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
+pub use metrics::{MetricsError, PodMetrics};
 pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};
-pub use fixtures::{DeploymentFixture, PodFixture, ServiceFixture};
-pub use metrics::{metrics, SeppoMetrics};
+pub use fixtures::{deployment, pod, service, DeploymentFixture, PodFixture, ServiceFixture};
 pub use portforward::{PortForward, PortForwardError};
 pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
 };
 pub use runner::{run, run_with_env, RunResult, RunnerError};
-pub use stack::{ServiceBuilder, Stack, StackError};
-pub use telemetry::{init_telemetry, TelemetryConfig, TelemetryError, TelemetryGuard};
+pub use stack::{stack, ServiceBuilder, Stack, StackError};
+pub use telemetry::init_logging;
 pub use traffic::{HttpAssert, RequestRecord, TrafficError, TrafficRecorder};
 pub use wait::{ResourceState, WaitError, WaitEvent};
 

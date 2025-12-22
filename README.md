@@ -60,7 +60,7 @@ The goal: you should never need to write YAML again.
          │                       ├── get/list()   → read resources
          │                       ├── delete()     → remove resources
          │                       ├── wait_ready() → poll until ready
-         │                       ├── forward()    → port forward
+         │                       ├── port_forward() → port forward
          │                       ├── exec()       → run commands
          │                       └── logs()       → stream logs
 ```
@@ -111,7 +111,7 @@ async fn test_my_app(ctx: Context) {
     ctx.apply(&deployment).await?;
     ctx.wait_ready("deployment/myapp").await?;
 
-    let pf = ctx.forward_to("svc/myapp", 8080).await?;
+    let pf = ctx.port_forward("svc/myapp", 8080).await?;
     assert!(pf.get("/health").await?.contains("ok"));
 }
 // Cleanup automatic on success, diagnostics on failure
@@ -120,9 +120,9 @@ async fn test_my_app(ctx: Context) {
 ### Resource Builders
 
 ```rust
-use seppo::DeploymentFixture;
+use seppo::deployment;
 
-let deployment = DeploymentFixture::new("myapp")
+let deploy = deployment("myapp")
     .image("nginx:latest")
     .replicas(3)
     .port(80)
@@ -130,15 +130,15 @@ let deployment = DeploymentFixture::new("myapp")
     .label("tier", "frontend")
     .build();
 
-ctx.apply(&deployment).await?;
+ctx.apply(&deploy).await?;
 ```
 
 ### Deploy Stacks
 
 ```rust
-use seppo::Stack;
+use seppo::stack;
 
-let stack = Stack::new()
+let s = stack()
     .service("frontend")
         .image("fe:v1")
         .replicas(2)
@@ -152,7 +152,7 @@ let stack = Stack::new()
         .port(5432)
     .build();
 
-ctx.up(&stack).await?;
+ctx.up(&s).await?;
 ```
 
 ### Async Conditions
