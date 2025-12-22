@@ -2455,6 +2455,37 @@ impl Context {
         )
     }
 
+    /// Get resource metrics from the metrics-server API
+    ///
+    /// Currently supports pod metrics. The target format follows
+    /// kubectl-style references: `pod/name` or just `name` (treated as pod).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let metrics = ctx.metrics("pod/api-xyz").await?;
+    ///
+    /// println!("CPU: {}", metrics.cpu);           // "250m"
+    /// println!("Memory: {}", metrics.memory);     // "512Mi"
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `MetricsError::ServerNotAvailable` if metrics-server is not installed.
+    /// Returns `MetricsError::PodNotFound` if the specified pod doesn't exist.
+    pub async fn metrics(
+        &self,
+        target: &str,
+    ) -> Result<crate::metrics::PodMetrics, crate::metrics::MetricsError> {
+        let pod_name = if target.starts_with("pod/") {
+            target.strip_prefix("pod/").unwrap_or(target)
+        } else {
+            target
+        };
+
+        crate::metrics::fetch_pod_metrics(&self.client, &self.namespace, pod_name).await
+    }
+
     /// Start an Ingress test chain
     ///
     /// Provides fluent assertions for testing Ingress resources.
