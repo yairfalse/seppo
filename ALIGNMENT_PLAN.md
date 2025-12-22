@@ -89,6 +89,7 @@ pub fn service_account(name: &str) -> ServiceAccountBuilder {
 }
 ```
 
+**Note:** `ServiceAccountBuilder` and the `service_account()` helper are planned for future implementation and are **not** part of this PR.
 **Files to change:**
 - `src/fixtures.rs` - add lowercase functions
 - `src/stack.rs` - add `stack()` function
