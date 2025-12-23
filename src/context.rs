@@ -539,6 +539,45 @@ impl Context {
         self.apply(&secret).await
     }
 
+    /// Create a Secret from environment variables
+    ///
+    /// Each key is looked up in the current process environment.
+    /// Returns an error if any key is not set.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // With env vars: API_KEY=abc123, API_SECRET=xyz789
+    /// ctx.secret_from_env("api-keys", &["API_KEY", "API_SECRET"]).await?;
+    /// ```
+    pub async fn secret_from_env(&self, name: &str, keys: &[&str]) -> Result<Secret, ContextError> {
+        let env_data = lookup_env_vars(keys).map_err(ContextError::ApplyError)?;
+
+        let mut data = std::collections::BTreeMap::new();
+        for (key, value) in env_data {
+            data.insert(key, k8s_openapi::ByteString(value.into_bytes()));
+        }
+
+        let secret = Secret {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(self.namespace.clone()),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+
+        debug!(
+            namespace = %self.namespace,
+            secret = %name,
+            keys = ?keys,
+            "Creating secret from environment variables"
+        );
+
+        self.apply(&secret).await
+    }
+
     /// Create a TLS Secret from certificate and key files
     ///
     /// Creates a Kubernetes TLS secret with the standard `tls.crt` and `tls.key` keys.
@@ -3330,6 +3369,24 @@ impl RBACBuilder {
     }
 }
 
+/// Look up environment variables and return their values
+///
+/// Returns an error if any key is not set in the environment.
+fn lookup_env_vars(keys: &[&str]) -> Result<HashMap<String, String>, String> {
+    let mut data = HashMap::new();
+    for key in keys {
+        match std::env::var(key) {
+            Ok(value) => {
+                data.insert(key.to_string(), value);
+            }
+            Err(_) => {
+                return Err(format!("environment variable {} is not set", key));
+            }
+        }
+    }
+    Ok(data)
+}
+
 /// Returns the correct API group for a resource
 fn api_group_for_resource(resource: &str) -> String {
     match resource {
@@ -5732,5 +5789,43 @@ mod tests {
         );
         assert!(improved.contains("image"));
         assert!(improved.contains("nginx:nonexistent"));
+    }
+
+    // ============================================================
+    // secret_from_env tests
+    // ============================================================
+
+    #[test]
+    fn test_secret_from_env_missing_var_returns_error() {
+        // Ensure the env var doesn't exist
+        std::env::remove_var("SEPPO_TEST_NONEXISTENT_VAR");
+
+        // The error should mention the missing env var
+        let result = lookup_env_vars(&["SEPPO_TEST_NONEXISTENT_VAR"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("SEPPO_TEST_NONEXISTENT_VAR"),
+            "Error should mention the missing var: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_secret_from_env_collects_values() {
+        // Set test env vars
+        std::env::set_var("SEPPO_TEST_USER", "admin");
+        std::env::set_var("SEPPO_TEST_PASS", "secret123");
+
+        let result = lookup_env_vars(&["SEPPO_TEST_USER", "SEPPO_TEST_PASS"]);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.get("SEPPO_TEST_USER"), Some(&"admin".to_string()));
+        assert_eq!(data.get("SEPPO_TEST_PASS"), Some(&"secret123".to_string()));
+
+        // Cleanup
+        std::env::remove_var("SEPPO_TEST_USER");
+        std::env::remove_var("SEPPO_TEST_PASS");
     }
 }
