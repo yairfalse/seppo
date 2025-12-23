@@ -1,0 +1,63 @@
+name: CI (sykli)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ci:
+    name: sykli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "seppo-ci"
+
+      # Install cargo-audit (for security checks)
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Install sykli
+      - name: Install sykli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/yairfalse/sykli/main/install.sh | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      # Clone sykli SDK (needed until published to crates.io)
+      - name: Get sykli SDK
+        run: git clone --depth 1 https://github.com/yairfalse/sykli.git ../sykli
+
+      # Run sykli
+      - name: Run CI
+        run: sykli
+
+  status:
+    name: CI Status
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: always()
+    env:
+      CI_RESULT: ${{ needs.ci.result }}
+    steps:
+      - name: Check results
+        run: |
+          if [ "$CI_RESULT" == "failure" ] || [ "$CI_RESULT" == "cancelled" ]; then
+            echo "CI failed"
+            exit 1
+          fi
+          echo "All checks passed"

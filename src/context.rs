@@ -278,10 +278,7 @@ fn improve_error_message(err: &kube::Error, resource_kind: &str, resource_name: 
     }
 
     if raw.contains("AlreadyExists") || raw.contains("409") {
-        return format!(
-            "{} '{}' already exists",
-            resource_kind, resource_name
-        );
+        return format!("{} '{}' already exists", resource_kind, resource_name);
     }
 
     if raw.contains("ImagePullBackOff") || raw.contains("ErrImagePull") {
@@ -316,10 +313,7 @@ fn improve_error_message(err: &kube::Error, resource_kind: &str, resource_name: 
     }
 
     if raw.contains("timeout") || raw.contains("deadline exceeded") {
-        return format!(
-            "{} '{}': operation timed out",
-            resource_kind, resource_name
-        );
+        return format!("{} '{}': operation timed out", resource_kind, resource_name);
     }
 
     // For unrecognized errors, add context prefix
@@ -931,9 +925,7 @@ impl Context {
         let list = api
             .list(&Default::default())
             .await
-            .map_err(|e| {
-                ContextError::ListError(format!("failed to list {}: {}", kind, e))
-            })?;
+            .map_err(|e| ContextError::ListError(format!("failed to list {}: {}", kind, e)))?;
 
         Ok(list.items)
     }
@@ -2654,7 +2646,10 @@ impl Context {
                 println!("Phase: {} ({} restarts)", phase, restarts);
 
                 // Print container statuses
-                if let Some(statuses) = p.status.as_ref().and_then(|s| s.container_statuses.as_ref())
+                if let Some(statuses) = p
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.container_statuses.as_ref())
                 {
                     println!();
                     println!("=== Containers ===");
@@ -2676,7 +2671,14 @@ impl Context {
             Ok(logs) => {
                 println!();
                 println!("=== Logs (last 20 lines) ===");
-                for line in logs.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
+                for line in logs
+                    .lines()
+                    .rev()
+                    .take(20)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                {
                     println!("  {}", line);
                 }
             }
@@ -2844,7 +2846,13 @@ impl Context {
                         Ok(logs) => {
                             println!();
                             println!("=== Logs [{}] (last 20 lines) ===", name);
-                            for line in logs.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev()
+                            for line in logs
+                                .lines()
+                                .rev()
+                                .take(20)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
                             {
                                 println!("  {}", line);
                             }
@@ -5703,11 +5711,11 @@ mod tests {
         );
 
         // Simulate the behavior - we can't easily create a kube::Error but we can test patterns
-        let improved_not_found = format!(
-            "{} '{}' not found in namespace",
-            "ConfigMap", "myconfig"
+        let improved_not_found = format!("{} '{}' not found in namespace", "ConfigMap", "myconfig");
+        assert_eq!(
+            improved_not_found,
+            "ConfigMap 'myconfig' not found in namespace"
         );
-        assert_eq!(improved_not_found, "ConfigMap 'myconfig' not found in namespace");
     }
 
     #[test]

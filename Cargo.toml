@@ -47,3 +47,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+# === Sykli CI ===
+[[bin]]
+name = "sykli"
+path = "sykli.rs"
+
+[features]
+sykli = ["dep:sykli-sdk"]
+
+[dependencies.sykli-sdk]
+package = "sykli"
+path = "../sykli/sdk/rust"
+optional = true

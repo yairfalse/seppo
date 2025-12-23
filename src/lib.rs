@@ -90,9 +90,9 @@ pub use context::{
 pub use context::TestContext;
 pub use diagnostics::Diagnostics;
 pub use environment::{setup, EnvironmentError, SetupResult};
-pub use metrics::{MetricsError, PodMetrics};
 pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};
 pub use fixtures::{deployment, pod, service, DeploymentFixture, PodFixture, ServiceFixture};
+pub use metrics::{MetricsError, PodMetrics};
 pub use portforward::{PortForward, PortForwardError};
 pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
