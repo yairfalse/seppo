@@ -38,11 +38,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/yairfalse/sykli/main/install.sh | bash
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      # Clone sykli SDK (needed until published to crates.io)
-      - name: Get sykli SDK
-        run: git clone --depth 1 https://github.com/yairfalse/sykli.git ../sykli
-
-      # Run sykli
+      # Run sykli (SDK now on crates.io!)
       - name: Run CI
         run: sykli
 

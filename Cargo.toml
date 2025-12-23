@@ -58,5 +58,5 @@ sykli = ["dep:sykli-sdk"]
 
 [dependencies.sykli-sdk]
 package = "sykli"
-path = "../sykli/sdk/rust"
+version = "0.1"
 optional = true
