@@ -207,7 +207,6 @@ SEPPO_KEEP_ALL=true          # never cleanup, even on success (debug mode)
 - `eventually`, `consistently` - Async condition helpers
 - Port forwarding and exec
 - Diagnostics collection
-- OpenTelemetry integration
 
 ---
 

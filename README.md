@@ -1,6 +1,11 @@
-# seppo
+# SEPPO
 
 **Kubernetes SDK for Rust. No YAML. No CLI. Just code.**
+
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+
+**This is a learning project** - exploring Kubernetes SDK patterns in Rust.
 
 ```rust
 use seppo::Context;
@@ -207,7 +212,7 @@ When tests fail, Seppo keeps the namespace and dumps diagnostics:
 | **Testing** | `#[seppo::test]`, eventually/consistently, assertions |
 | **Diagnostics** | Pod logs, events, failure reports |
 | **Providers** | Kind, Minikube, existing clusters |
-| **Telemetry** | OpenTelemetry integration |
+| **Assertions** | Semantic assertions on pods, deployments, services |
 
 ---
 
@@ -223,11 +228,15 @@ When tests fail, Seppo keeps the namespace and dumps diagnostics:
 
 ---
 
-## Name
+## Naming
 
-*Seppo Ilmarinen* — the eternal hammerer, legendary smith of the Kalevala. He forged the Sampo, the mythical artifact of prosperity. Like Ilmarinen at his forge, Seppo shapes Kubernetes from raw code into running infrastructure.
-
-The Rust SDK is **Seppo**. The Go SDK is **Ilmari**. Same forge, different metals.
+**Seppo** (Finnish smith god from Kalevala) - Part of a Finnish tool naming theme:
+- **SEPPO** (smith) - Kubernetes SDK for Rust
+- **ILMARI** (smith) - Kubernetes SDK for Go
+- **SYKLI** (cycle) - CI orchestrator
+- **NOPEA** (fast) - GitOps controller
+- **KULTA** (gold) - Progressive delivery
+- **RAUTA** (iron) - Gateway API controller
 
 ---
 
