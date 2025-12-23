@@ -50,6 +50,106 @@ pub enum ForwardTarget {
     Deployment(String),
 }
 
+/// GroupVersionResource identifies a Kubernetes resource type
+///
+/// Used with the dynamic client to work with CRDs and other resources
+/// without compile-time type information.
+///
+/// # Example
+///
+/// ```ignore
+/// // For Gateway API HTTPRoute
+/// let gvr = Gvr::new("gateway.networking.k8s.io", "v1", "httproutes", "HTTPRoute");
+///
+/// // Or use built-in helpers
+/// let gvr = Gvr::http_route();
+///
+/// ctx.apply_dynamic(&gvr, &json!({
+///     "apiVersion": "gateway.networking.k8s.io/v1",
+///     "kind": "HTTPRoute",
+///     "metadata": { "name": "my-route" },
+///     "spec": { ... }
+/// })).await?;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gvr {
+    /// API group (e.g., "gateway.networking.k8s.io", "" for core)
+    pub group: String,
+    /// API version (e.g., "v1", "v1beta1")
+    pub version: String,
+    /// Resource name (plural, e.g., "httproutes", "pods")
+    pub resource: String,
+    /// Kind name (singular, e.g., "HTTPRoute", "Pod")
+    pub kind: String,
+}
+
+impl Gvr {
+    /// Create a new GroupVersionResource
+    pub fn new(group: &str, version: &str, resource: &str, kind: &str) -> Self {
+        Self {
+            group: group.to_string(),
+            version: version.to_string(),
+            resource: resource.to_string(),
+            kind: kind.to_string(),
+        }
+    }
+
+    /// Gateway API: GatewayClass
+    pub fn gateway_class() -> Self {
+        Self::new(
+            "gateway.networking.k8s.io",
+            "v1",
+            "gatewayclasses",
+            "GatewayClass",
+        )
+    }
+
+    /// Gateway API: Gateway
+    pub fn gateway() -> Self {
+        Self::new("gateway.networking.k8s.io", "v1", "gateways", "Gateway")
+    }
+
+    /// Gateway API: HTTPRoute
+    pub fn http_route() -> Self {
+        Self::new("gateway.networking.k8s.io", "v1", "httproutes", "HTTPRoute")
+    }
+
+    /// Gateway API: GRPCRoute
+    pub fn grpc_route() -> Self {
+        Self::new("gateway.networking.k8s.io", "v1", "grpcroutes", "GRPCRoute")
+    }
+
+    /// Cert-Manager: Certificate
+    pub fn certificate() -> Self {
+        Self::new("cert-manager.io", "v1", "certificates", "Certificate")
+    }
+
+    /// Cert-Manager: Issuer
+    pub fn issuer() -> Self {
+        Self::new("cert-manager.io", "v1", "issuers", "Issuer")
+    }
+
+    /// Cert-Manager: ClusterIssuer
+    pub fn cluster_issuer() -> Self {
+        Self::new("cert-manager.io", "v1", "clusterissuers", "ClusterIssuer")
+    }
+
+    /// Convert to kube ApiResource
+    pub(crate) fn to_api_resource(&self) -> kube::core::ApiResource {
+        kube::core::ApiResource {
+            group: self.group.clone(),
+            version: self.version.clone(),
+            api_version: if self.group.is_empty() {
+                self.version.clone()
+            } else {
+                format!("{}/{}", self.group, self.version)
+            },
+            kind: self.kind.clone(),
+            plural: self.resource.clone(),
+        }
+    }
+}
+
 /// Extract just the resource name from either "name" or "kind/name" format
 ///
 /// This helper allows methods to accept both formats for consistency:
@@ -946,6 +1046,185 @@ impl Context {
         );
 
         Ok(patched)
+    }
+
+    // ========================================================================
+    // Dynamic Client Operations (for CRDs and unstructured resources)
+    // ========================================================================
+
+    /// Apply an unstructured resource using the dynamic client
+    ///
+    /// Useful for CRDs or when you don't have typed structs.
+    /// Creates the resource if it doesn't exist, updates if it does.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let gvr = Gvr::http_route();
+    /// ctx.apply_dynamic(&gvr, &json!({
+    ///     "apiVersion": "gateway.networking.k8s.io/v1",
+    ///     "kind": "HTTPRoute",
+    ///     "metadata": { "name": "my-route" },
+    ///     "spec": {
+    ///         "parentRefs": [{ "name": "my-gateway" }],
+    ///         "rules": [{ "backendRefs": [{ "name": "my-service", "port": 8080 }] }]
+    ///     }
+    /// })).await?;
+    /// ```
+    pub async fn apply_dynamic(
+        &self,
+        gvr: &Gvr,
+        obj: &serde_json::Value,
+    ) -> Result<serde_json::Value, ContextError> {
+        use kube::api::DynamicObject;
+
+        let ar = gvr.to_api_resource();
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.namespace, &ar);
+
+        // Parse the JSON into a DynamicObject
+        let mut dyn_obj: DynamicObject = serde_json::from_value(obj.clone())
+            .map_err(|e| ContextError::ApplyError(format!("invalid object format: {}", e)))?;
+
+        // Ensure namespace is set
+        if dyn_obj.metadata.namespace.is_none() {
+            dyn_obj.metadata.namespace = Some(self.namespace.clone());
+        }
+
+        let name = dyn_obj.metadata.name.clone().ok_or_else(|| {
+            ContextError::ApplyError("object must have metadata.name".to_string())
+        })?;
+
+        // Try to get existing, create or update
+        let result = match api.get(&name).await {
+            Ok(existing) => {
+                // Update - preserve resourceVersion
+                dyn_obj.metadata.resource_version = existing.metadata.resource_version;
+                api.replace(&name, &PostParams::default(), &dyn_obj)
+                    .await
+                    .map_err(|e| {
+                        ContextError::ApplyError(format!("failed to update {}: {}", name, e))
+                    })?
+            }
+            Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
+                // Create
+                api.create(&PostParams::default(), &dyn_obj)
+                    .await
+                    .map_err(|e| {
+                        ContextError::ApplyError(format!("failed to create {}: {}", name, e))
+                    })?
+            }
+            Err(e) => {
+                return Err(ContextError::ApplyError(format!(
+                    "failed to check {}: {}",
+                    name, e
+                )));
+            }
+        };
+
+        info!(
+            namespace = %self.namespace,
+            name = %name,
+            gvr = ?gvr,
+            "Applied dynamic resource"
+        );
+
+        serde_json::to_value(result)
+            .map_err(|e| ContextError::ApplyError(format!("failed to serialize result: {}", e)))
+    }
+
+    /// Get an unstructured resource using the dynamic client
+    ///
+    /// Returns the resource as a JSON value.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let gvr = Gvr::http_route();
+    /// let route = ctx.get_dynamic(&gvr, "my-route").await?;
+    /// println!("Route spec: {:?}", route["spec"]);
+    /// ```
+    pub async fn get_dynamic(
+        &self,
+        gvr: &Gvr,
+        name: &str,
+    ) -> Result<serde_json::Value, ContextError> {
+        use kube::api::DynamicObject;
+
+        let ar = gvr.to_api_resource();
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.namespace, &ar);
+
+        let obj = api.get(name).await.map_err(|e| {
+            ContextError::GetError(format!("{} '{}' not found: {}", gvr.kind, name, e))
+        })?;
+
+        serde_json::to_value(obj)
+            .map_err(|e| ContextError::GetError(format!("failed to serialize: {}", e)))
+    }
+
+    /// Delete an unstructured resource using the dynamic client
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let gvr = Gvr::http_route();
+    /// ctx.delete_dynamic(&gvr, "my-route").await?;
+    /// ```
+    pub async fn delete_dynamic(&self, gvr: &Gvr, name: &str) -> Result<(), ContextError> {
+        use kube::api::DynamicObject;
+
+        let ar = gvr.to_api_resource();
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.namespace, &ar);
+
+        api.delete(name, &DeleteParams::default())
+            .await
+            .map_err(|e| {
+                ContextError::DeleteError(format!("{} '{}' delete failed: {}", gvr.kind, name, e))
+            })?;
+
+        info!(
+            namespace = %self.namespace,
+            name = %name,
+            gvr = ?gvr,
+            "Deleted dynamic resource"
+        );
+
+        Ok(())
+    }
+
+    /// List unstructured resources using the dynamic client
+    ///
+    /// Returns resources as a vector of JSON values.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let gvr = Gvr::http_route();
+    /// let routes = ctx.list_dynamic(&gvr).await?;
+    /// for route in routes {
+    ///     println!("Route: {}", route["metadata"]["name"]);
+    /// }
+    /// ```
+    pub async fn list_dynamic(&self, gvr: &Gvr) -> Result<Vec<serde_json::Value>, ContextError> {
+        use kube::api::DynamicObject;
+
+        let ar = gvr.to_api_resource();
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.namespace, &ar);
+
+        let list = api.list(&ListParams::default()).await.map_err(|e| {
+            ContextError::ListError(format!("failed to list {}: {}", gvr.resource, e))
+        })?;
+
+        list.items
+            .into_iter()
+            .map(|obj| {
+                serde_json::to_value(obj)
+                    .map_err(|e| ContextError::ListError(format!("failed to serialize: {}", e)))
+            })
+            .collect()
     }
 
     /// Get a resource from the test namespace
@@ -5931,5 +6210,42 @@ mod tests {
         // Cleanup
         std::env::remove_var("SEPPO_TEST_USER");
         std::env::remove_var("SEPPO_TEST_PASS");
+    }
+
+    // ============================================================
+    // Gvr (GroupVersionResource) tests
+    // ============================================================
+
+    #[test]
+    fn test_gvr_new() {
+        let gvr = Gvr::new("gateway.networking.k8s.io", "v1", "gateways", "Gateway");
+        assert_eq!(gvr.group, "gateway.networking.k8s.io");
+        assert_eq!(gvr.version, "v1");
+        assert_eq!(gvr.resource, "gateways");
+        assert_eq!(gvr.kind, "Gateway");
+    }
+
+    #[test]
+    fn test_gvr_core_api() {
+        // Core API group has empty string for group
+        let gvr = Gvr::new("", "v1", "pods", "Pod");
+        assert_eq!(gvr.group, "");
+        assert_eq!(gvr.version, "v1");
+    }
+
+    #[test]
+    fn test_gvr_common_crds() {
+        // Gateway API
+        let gateway = Gvr::gateway_class();
+        assert_eq!(gateway.group, "gateway.networking.k8s.io");
+        assert_eq!(gateway.resource, "gatewayclasses");
+
+        let httproute = Gvr::http_route();
+        assert_eq!(httproute.resource, "httproutes");
+
+        // Cert-manager
+        let cert = Gvr::certificate();
+        assert_eq!(cert.group, "cert-manager.io");
+        assert_eq!(cert.resource, "certificates");
     }
 }
