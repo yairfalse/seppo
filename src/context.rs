@@ -150,6 +150,154 @@ impl Gvr {
     }
 }
 
+// ============================================================================
+// Traffic Testing Types
+// ============================================================================
+
+/// Configuration for traffic generation
+///
+/// # Example
+///
+/// ```ignore
+/// let config = TrafficConfig::default()
+///     .with_rps(100)
+///     .with_duration(Duration::from_secs(30))
+///     .with_endpoint("/health");
+/// ```
+#[derive(Debug, Clone)]
+pub struct TrafficConfig {
+    /// Requests per second
+    pub rps: u32,
+    /// How long to generate traffic
+    pub duration: std::time::Duration,
+    /// HTTP endpoint to hit
+    pub endpoint: String,
+}
+
+impl Default for TrafficConfig {
+    fn default() -> Self {
+        Self {
+            rps: 10,
+            duration: std::time::Duration::from_secs(10),
+            endpoint: "/".to_string(),
+        }
+    }
+}
+
+impl TrafficConfig {
+    /// Set requests per second
+    pub fn with_rps(mut self, rps: u32) -> Self {
+        self.rps = rps;
+        self
+    }
+
+    /// Set duration
+    pub fn with_duration(mut self, duration: std::time::Duration) -> Self {
+        self.duration = duration;
+        self
+    }
+
+    /// Set endpoint path
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
+    }
+}
+
+/// Statistics from a traffic test
+#[derive(Debug, Clone)]
+pub struct TrafficStats {
+    /// Total requests made
+    pub total_requests: u64,
+    /// Number of failed requests
+    pub errors: u64,
+    /// Individual request latencies
+    pub latencies: Vec<std::time::Duration>,
+}
+
+impl TrafficStats {
+    /// Calculate error rate (0.0 to 1.0)
+    pub fn error_rate(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            self.errors as f64 / self.total_requests as f64
+        }
+    }
+
+    /// Calculate 99th percentile latency
+    pub fn p99_latency(&self) -> std::time::Duration {
+        if self.latencies.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+
+        let mut sorted = self.latencies.clone();
+        sorted.sort();
+
+        let idx = ((sorted.len() as f64) * 0.99) as usize;
+        let idx = idx.min(sorted.len() - 1);
+        sorted[idx]
+    }
+
+    /// Calculate median latency
+    pub fn median_latency(&self) -> std::time::Duration {
+        if self.latencies.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+
+        let mut sorted = self.latencies.clone();
+        sorted.sort();
+        sorted[sorted.len() / 2]
+    }
+}
+
+/// Handle to running traffic generation
+///
+/// Use `wait()` to block until traffic generation completes,
+/// or `stop()` to stop early. Use `stats()` to get results.
+pub struct TrafficHandle {
+    _pf: PortForward,
+    handle: tokio::task::JoinHandle<()>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    total: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    errors: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    latencies: std::sync::Arc<std::sync::Mutex<Vec<std::time::Duration>>>,
+}
+
+impl TrafficHandle {
+    /// Wait for traffic generation to complete
+    pub async fn wait(self) {
+        let _ = self.handle.await;
+    }
+
+    /// Stop traffic generation early
+    pub fn stop(&self) {
+        self.stop_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get current statistics
+    pub fn stats(&self) -> TrafficStats {
+        use std::sync::atomic::Ordering;
+
+        TrafficStats {
+            total_requests: self.total.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            latencies: self.latencies.lock().unwrap().clone(),
+        }
+    }
+
+    /// Get total requests made so far
+    pub fn total_requests(&self) -> u64 {
+        self.total.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get error rate so far
+    pub fn error_rate(&self) -> f64 {
+        self.stats().error_rate()
+    }
+}
+
 /// Extract just the resource name from either "name" or "kind/name" format
 ///
 /// This helper allows methods to accept both formats for consistency:
@@ -2876,6 +3024,190 @@ impl Context {
 
         // This is reached when all attempts fail
         Err(last_error.expect("max_attempts > 0 guarantees at least one iteration"))
+    }
+
+    // ========================================================================
+    // Test Scenario Helpers
+    // ========================================================================
+
+    /// Test self-healing behavior of a deployment
+    ///
+    /// Kills a pod and verifies the deployment recovers within the timeout.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.test_self_healing("deployment/myapp", Duration::from_secs(60)).await?;
+    /// ```
+    pub async fn test_self_healing(
+        &self,
+        resource: &str,
+        recovery_timeout: std::time::Duration,
+    ) -> Result<(), ContextError> {
+        // Parse deployment/name format
+        let (kind, name) = parse_resource_ref(resource)?;
+        if kind != ResourceKind::Deployment {
+            return Err(ContextError::InvalidResourceRef(
+                "test_self_healing requires deployment/name format".to_string(),
+            ));
+        }
+
+        // Find a pod from this deployment
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let pod_list = pods
+            .list(&ListParams::default().labels(&format!("app={}", name)))
+            .await
+            .map_err(|e| ContextError::ListError(format!("failed to list pods: {}", e)))?;
+
+        if pod_list.items.is_empty() {
+            return Err(ContextError::ListError(format!(
+                "no pods found for deployment {}",
+                name
+            )));
+        }
+
+        // Kill the first pod
+        let pod_name = pod_list.items[0]
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| ContextError::ListError("pod has no name".to_string()))?;
+
+        info!(
+            namespace = %self.namespace,
+            deployment = %name,
+            pod = %pod_name,
+            "Killing pod for self-healing test"
+        );
+
+        self.kill(&format!("pod/{}", pod_name)).await?;
+
+        // Wait for recovery
+        self.wait_ready_with_timeout(resource, recovery_timeout)
+            .await
+    }
+
+    /// Test scaling behavior of a deployment
+    ///
+    /// Scales to the target replica count and waits for stability.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.test_scaling("deployment/myapp", 5, Duration::from_secs(60)).await?;
+    /// ```
+    pub async fn test_scaling(
+        &self,
+        resource: &str,
+        target_replicas: i32,
+        timeout: std::time::Duration,
+    ) -> Result<(), ContextError> {
+        // Parse deployment/name format
+        let (kind, name) = parse_resource_ref(resource)?;
+        if kind != ResourceKind::Deployment {
+            return Err(ContextError::InvalidResourceRef(
+                "test_scaling requires deployment/name format".to_string(),
+            ));
+        }
+
+        info!(
+            namespace = %self.namespace,
+            deployment = %name,
+            target_replicas = target_replicas,
+            "Scaling deployment for scaling test"
+        );
+
+        // Scale the deployment
+        self.scale(resource, target_replicas).await?;
+
+        // Wait for stability
+        self.wait_ready_with_timeout(resource, timeout).await
+    }
+
+    /// Start generating HTTP traffic to a service
+    ///
+    /// Returns a handle that can be used to wait for completion and get statistics.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = TrafficConfig::default()
+    ///     .with_rps(100)
+    ///     .with_duration(Duration::from_secs(30));
+    ///
+    /// let traffic = ctx.start_traffic("svc/myapp", 8080, config).await?;
+    /// traffic.wait().await;
+    /// let stats = traffic.stats();
+    /// println!("Error rate: {:.2}%", stats.error_rate() * 100.0);
+    /// ```
+    pub async fn start_traffic(
+        &self,
+        resource: &str,
+        port: u16,
+        config: TrafficConfig,
+    ) -> Result<TrafficHandle, PortForwardError> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        // Set up port forward
+        let pf = self.port_forward(resource, port).await?;
+        let local_port = pf.local_addr().port();
+
+        // Create shared state
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let total = Arc::new(AtomicU64::new(0));
+        let errors = Arc::new(AtomicU64::new(0));
+        let latencies = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        // Clone for the spawned task
+        let stop_flag_clone = stop_flag.clone();
+        let total_clone = total.clone();
+        let errors_clone = errors.clone();
+        let latencies_clone = latencies.clone();
+        let endpoint = config.endpoint.clone();
+        let rps = config.rps;
+        let duration = config.duration;
+
+        // Start traffic generation in background
+        let handle = tokio::spawn(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+
+            let interval = std::time::Duration::from_secs_f64(1.0 / rps as f64);
+            let deadline = std::time::Instant::now() + duration;
+
+            while std::time::Instant::now() < deadline && !stop_flag_clone.load(Ordering::Relaxed) {
+                let start = std::time::Instant::now();
+                let url = format!("http://127.0.0.1:{}{}", local_port, endpoint);
+
+                let result = client.get(&url).send().await;
+                let latency = start.elapsed();
+
+                total_clone.fetch_add(1, Ordering::Relaxed);
+                if let Ok(ref resp) = result {
+                    if !resp.status().is_success() {
+                        errors_clone.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    errors_clone.fetch_add(1, Ordering::Relaxed);
+                }
+
+                latencies_clone.lock().unwrap().push(latency);
+
+                tokio::time::sleep(interval).await;
+            }
+        });
+
+        Ok(TrafficHandle {
+            _pf: pf,
+            handle,
+            stop_flag,
+            total,
+            errors,
+            latencies,
+        })
     }
 
     /// Create a pod assertion builder
@@ -6247,5 +6579,52 @@ mod tests {
         let cert = Gvr::certificate();
         assert_eq!(cert.group, "cert-manager.io");
         assert_eq!(cert.resource, "certificates");
+    }
+
+    // ============================================================
+    // TrafficConfig tests
+    // ============================================================
+
+    #[test]
+    fn test_traffic_config_default() {
+        let config = TrafficConfig::default();
+        assert_eq!(config.rps, 10);
+        assert_eq!(config.duration, std::time::Duration::from_secs(10));
+        assert_eq!(config.endpoint, "/");
+    }
+
+    #[test]
+    fn test_traffic_config_builder() {
+        let config = TrafficConfig::default()
+            .with_rps(100)
+            .with_duration(std::time::Duration::from_secs(30))
+            .with_endpoint("/health");
+
+        assert_eq!(config.rps, 100);
+        assert_eq!(config.duration, std::time::Duration::from_secs(30));
+        assert_eq!(config.endpoint, "/health");
+    }
+
+    #[test]
+    fn test_traffic_stats_error_rate() {
+        let stats = TrafficStats {
+            total_requests: 100,
+            errors: 5,
+            latencies: vec![],
+        };
+        assert!((stats.error_rate() - 0.05).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_traffic_stats_p99_latency() {
+        let latencies: Vec<std::time::Duration> =
+            (1..=100).map(std::time::Duration::from_millis).collect();
+        let stats = TrafficStats {
+            total_requests: 100,
+            errors: 0,
+            latencies,
+        };
+        // 99th percentile of 1-100ms should be around 99ms
+        assert!(stats.p99_latency() >= std::time::Duration::from_millis(99));
     }
 }
