@@ -2203,21 +2203,15 @@ impl Context {
                 let deployments: Api<Deployment> =
                     Api::namespaced(self.client.clone(), &self.namespace);
 
-                // Get current deployment
-                let mut dep = deployments
-                    .get(name)
-                    .await
-                    .map_err(|e| ContextError::GetError(e.to_string()))?;
+                // Use JSON merge patch to avoid conflicts
+                let patch = serde_json::json!({
+                    "spec": {
+                        "replicas": replicas
+                    }
+                });
 
-                // Update replicas
-                let spec = dep.spec.as_mut().ok_or_else(|| {
-                    ContextError::ApplyError(format!("deployment '{}' has no spec", name))
-                })?;
-                spec.replicas = Some(replicas);
-
-                // Apply update
                 deployments
-                    .replace(name, &PostParams::default(), &dep)
+                    .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
                     .await
                     .map_err(|e| ContextError::ApplyError(e.to_string()))?;
 
@@ -2377,25 +2371,23 @@ impl Context {
         let (kind, name) = parse_resource_ref(resource)?;
         let restarted_at = chrono::Utc::now().to_rfc3339();
 
+        // Use strategic merge patch to add restart annotation
+        let patch = serde_json::json!({
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "kubectl.kubernetes.io/restartedAt": restarted_at
+                        }
+                    }
+                }
+            }
+        });
+
         // Helper macro to reduce duplication across resource types
         macro_rules! restart_workload {
-            ($api:expr, $resource:expr, $kind_name:expr) => {{
-                let mut workload = $api
-                    .get(name)
-                    .await
-                    .map_err(|e| ContextError::GetError(e.to_string()))?;
-
-                let spec = workload.spec.as_mut().ok_or_else(|| {
-                    ContextError::ApplyError(format!("{} '{}' has no spec", $kind_name, name))
-                })?;
-                let template_meta = spec.template.metadata.get_or_insert_with(Default::default);
-                let annotations = template_meta.annotations.get_or_insert_with(Default::default);
-                annotations.insert(
-                    "kubectl.kubernetes.io/restartedAt".to_string(),
-                    restarted_at.clone(),
-                );
-
-                $api.replace(name, &PostParams::default(), &workload)
+            ($api:expr, $kind_name:expr) => {{
+                $api.patch(name, &PatchParams::default(), &Patch::Strategic(&patch))
                     .await
                     .map_err(|e| ContextError::ApplyError(e.to_string()))?;
 
@@ -2413,15 +2405,15 @@ impl Context {
         match kind {
             ResourceKind::Deployment => {
                 let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
-                restart_workload!(api, name, "deployment")
+                restart_workload!(api, "deployment")
             }
             ResourceKind::StatefulSet => {
                 let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), &self.namespace);
-                restart_workload!(api, name, "statefulset")
+                restart_workload!(api, "statefulset")
             }
             ResourceKind::DaemonSet => {
                 let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), &self.namespace);
-                restart_workload!(api, name, "daemonset")
+                restart_workload!(api, "daemonset")
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
                 "restart only supports deployment, statefulset, and daemonset, got {:?}",
@@ -4864,8 +4856,10 @@ mod tests {
 
         ctx.apply(&pod).await.expect("Should apply Pod");
 
-        // Wait a bit for pod to start and output logs
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        // Wait for pod to be running before getting logs
+        ctx.wait_ready("pod/test-pod")
+            .await
+            .expect("Pod should be ready");
 
         // Get logs
         let logs = ctx.logs("test-pod").await.expect("Should get logs");
@@ -5034,8 +5028,10 @@ mod tests {
 
         ctx.apply(&pod).await.expect("Should apply Pod");
 
-        // Wait for pod to start
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        // Wait for pod to be running before collecting logs
+        ctx.wait_ready("pod/log-test")
+            .await
+            .expect("Pod should be ready");
 
         // Collect all pod logs
         let pod_logs = ctx.collect_pod_logs().await.expect("Should collect logs");
@@ -5980,6 +5976,11 @@ mod tests {
             .await
             .expect("Should apply deployment");
 
+        // Wait for deployment to stabilize before scaling
+        ctx.wait_ready("deployment/scale-test")
+            .await
+            .expect("Should be ready");
+
         // Scale up to 3
         ctx.scale("deployment/scale-test", 3)
             .await
@@ -6047,6 +6048,11 @@ mod tests {
         ctx.apply(&deployment)
             .await
             .expect("Should apply deployment");
+
+        // Wait for deployment to stabilize before restarting
+        ctx.wait_ready("deployment/restart-test")
+            .await
+            .expect("Should be ready");
 
         // Restart the deployment
         ctx.restart("deployment/restart-test")
