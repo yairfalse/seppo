@@ -3,6 +3,7 @@
 //! Collects and formats diagnostic information when tests fail.
 
 use k8s_openapi::api::core::v1::Event;
+use k8s_openapi::chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -23,6 +24,7 @@ pub struct Diagnostics {
 
 impl Diagnostics {
     /// Create new empty diagnostics for a namespace
+    #[must_use]
     pub fn new(namespace: String) -> Self {
         Self {
             namespace,
@@ -36,7 +38,7 @@ impl Diagnostics {
     }
 
     fn section_header(title: &str) -> String {
-        let title_with_spaces = format!(" {} ", title);
+        let title_with_spaces = format!(" {title} ");
         let remaining = LINE_WIDTH.saturating_sub(title_with_spaces.len() + 3);
         format!(
             "{}{}{}",
@@ -68,7 +70,7 @@ impl fmt::Display for Diagnostics {
             for pod_name in pod_names {
                 let logs = &self.pod_logs[pod_name];
                 writeln!(f)?;
-                writeln!(f, "[{}]", pod_name)?;
+                writeln!(f, "[{pod_name}]")?;
 
                 if logs.is_empty() {
                     writeln!(f, "  (no logs)")?;
@@ -77,7 +79,7 @@ impl fmt::Display for Diagnostics {
                     let max_lines = 50;
 
                     for line in lines.iter().take(max_lines) {
-                        writeln!(f, "  {}", line)?;
+                        writeln!(f, "  {line}")?;
                     }
 
                     if lines.len() > max_lines {
@@ -99,22 +101,19 @@ impl fmt::Display for Diagnostics {
 
             // Sort events by timestamp, placing events without timestamps at the end
             let mut events: Vec<_> = self.events.iter().collect();
-            use k8s_openapi::chrono::{DateTime, Utc};
             events.sort_by_key(|event| {
                 // Use a far-future date for missing timestamps so they sort last
                 event
                     .last_timestamp
                     .as_ref()
-                    .map(|t| t.0)
-                    .unwrap_or(DateTime::<Utc>::MAX_UTC)
+                    .map_or(DateTime::<Utc>::MAX_UTC, |t| t.0)
             });
 
             for event in events {
-                let timestamp = event
-                    .last_timestamp
-                    .as_ref()
-                    .map(|t| t.0.format("%H:%M:%S").to_string())
-                    .unwrap_or_else(|| "??:??:??".to_string());
+                let timestamp = event.last_timestamp.as_ref().map_or_else(
+                    || "??:??:??".to_string(),
+                    |t| t.0.format("%H:%M:%S").to_string(),
+                );
 
                 let kind = event.involved_object.kind.as_deref().unwrap_or("?");
                 let name = event.involved_object.name.as_deref().unwrap_or("?");
@@ -122,7 +121,7 @@ impl fmt::Display for Diagnostics {
                 let message = event.message.as_deref().unwrap_or("");
 
                 // Truncate kind/name to fit column (12 chars)
-                let kind_name = format!("{}/{}", kind, name);
+                let kind_name = format!("{kind}/{name}");
                 let kind_name_display = if kind_name.len() > 12 {
                     format!("{}...", &kind_name[..9])
                 } else {
@@ -140,15 +139,14 @@ impl fmt::Display for Diagnostics {
                 let max_msg_len = 45;
                 let msg_display = if message.chars().count() > max_msg_len {
                     let truncated: String = message.chars().take(max_msg_len).collect();
-                    format!("{}...", truncated)
+                    format!("{truncated}...")
                 } else {
                     message.to_string()
                 };
 
                 writeln!(
                     f,
-                    "  • {}  {:12}  {:10}  {}",
-                    timestamp, kind_name_display, reason_display, msg_display
+                    "  • {timestamp}  {kind_name_display:12}  {reason_display:10}  {msg_display}"
                 )?;
             }
         }

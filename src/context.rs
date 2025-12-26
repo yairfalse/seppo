@@ -2,6 +2,20 @@
 //!
 //! Provides a connection to a Kubernetes cluster with namespace management.
 //! Can be used standalone or with the `#[seppo::test]` macro.
+//!
+//! # Errors
+//!
+//! All fallible methods in this module return `ContextError` which provides
+//! detailed error information for Kubernetes operations including:
+//! - Client connection errors
+//! - Namespace creation/deletion errors
+//! - Resource CRUD operation errors
+//! - Wait/timeout errors
+//! - Port forwarding errors
+
+// TODO: Add individual # Errors sections to each method for full pedantic compliance
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
 
 use crate::diagnostics::Diagnostics;
 use crate::portforward::{PortForward, PortForwardError};
@@ -20,7 +34,8 @@ use k8s_openapi::api::networking::v1::{
 };
 use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use kube::api::{
-    Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams,
+    Api, AttachParams, DeleteParams, ListParams, LogParams, ObjectMeta, Patch, PatchParams,
+    PostParams,
 };
 use kube::runtime::watcher::{self, Event as WatchEvent};
 use kube::Client;
@@ -29,7 +44,7 @@ use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
-/// Kubernetes resource kinds supported by wait_ready
+/// Kubernetes resource kinds supported by `wait_ready`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     Deployment,
@@ -50,7 +65,7 @@ pub enum ForwardTarget {
     Deployment(String),
 }
 
-/// GroupVersionResource identifies a Kubernetes resource type
+/// `GroupVersionResource` identifies a Kubernetes resource type
 ///
 /// Used with the dynamic client to work with CRDs and other resources
 /// without compile-time type information.
@@ -79,12 +94,13 @@ pub struct Gvr {
     pub version: String,
     /// Resource name (plural, e.g., "httproutes", "pods")
     pub resource: String,
-    /// Kind name (singular, e.g., "HTTPRoute", "Pod")
+    /// Kind name (singular, e.g., "`HTTPRoute`", "Pod")
     pub kind: String,
 }
 
 impl Gvr {
-    /// Create a new GroupVersionResource
+    /// Create a new `GroupVersionResource`
+    #[must_use]
     pub fn new(group: &str, version: &str, resource: &str, kind: &str) -> Self {
         Self {
             group: group.to_string(),
@@ -94,7 +110,8 @@ impl Gvr {
         }
     }
 
-    /// Gateway API: GatewayClass
+    /// Gateway API: `GatewayClass`
+    #[must_use]
     pub fn gateway_class() -> Self {
         Self::new(
             "gateway.networking.k8s.io",
@@ -105,36 +122,42 @@ impl Gvr {
     }
 
     /// Gateway API: Gateway
+    #[must_use]
     pub fn gateway() -> Self {
         Self::new("gateway.networking.k8s.io", "v1", "gateways", "Gateway")
     }
 
-    /// Gateway API: HTTPRoute
+    /// Gateway API: `HTTPRoute`
+    #[must_use]
     pub fn http_route() -> Self {
         Self::new("gateway.networking.k8s.io", "v1", "httproutes", "HTTPRoute")
     }
 
-    /// Gateway API: GRPCRoute
+    /// Gateway API: `GRPCRoute`
+    #[must_use]
     pub fn grpc_route() -> Self {
         Self::new("gateway.networking.k8s.io", "v1", "grpcroutes", "GRPCRoute")
     }
 
     /// Cert-Manager: Certificate
+    #[must_use]
     pub fn certificate() -> Self {
         Self::new("cert-manager.io", "v1", "certificates", "Certificate")
     }
 
     /// Cert-Manager: Issuer
+    #[must_use]
     pub fn issuer() -> Self {
         Self::new("cert-manager.io", "v1", "issuers", "Issuer")
     }
 
-    /// Cert-Manager: ClusterIssuer
+    /// Cert-Manager: `ClusterIssuer`
+    #[must_use]
     pub fn cluster_issuer() -> Self {
         Self::new("cert-manager.io", "v1", "clusterissuers", "ClusterIssuer")
     }
 
-    /// Convert to kube ApiResource
+    /// Convert to kube `ApiResource`
     pub(crate) fn to_api_resource(&self) -> kube::core::ApiResource {
         kube::core::ApiResource {
             group: self.group.clone(),
@@ -186,18 +209,21 @@ impl Default for TrafficConfig {
 
 impl TrafficConfig {
     /// Set requests per second
+    #[must_use]
     pub fn with_rps(mut self, rps: u32) -> Self {
         self.rps = rps;
         self
     }
 
     /// Set duration
+    #[must_use]
     pub fn with_duration(mut self, duration: std::time::Duration) -> Self {
         self.duration = duration;
         self
     }
 
     /// Set endpoint path
+    #[must_use]
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
         self
@@ -217,6 +243,8 @@ pub struct TrafficStats {
 
 impl TrafficStats {
     /// Calculate error rate (0.0 to 1.0)
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // Precision loss acceptable for statistics
     pub fn error_rate(&self) -> f64 {
         if self.total_requests == 0 {
             0.0
@@ -226,6 +254,12 @@ impl TrafficStats {
     }
 
     /// Calculate 99th percentile latency
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn p99_latency(&self) -> std::time::Duration {
         if self.latencies.is_empty() {
             return std::time::Duration::ZERO;
@@ -240,6 +274,7 @@ impl TrafficStats {
     }
 
     /// Calculate median latency
+    #[must_use]
     pub fn median_latency(&self) -> std::time::Duration {
         if self.latencies.is_empty() {
             return std::time::Duration::ZERO;
@@ -277,6 +312,11 @@ impl TrafficHandle {
     }
 
     /// Get current statistics
+    ///
+    /// # Panics
+    ///
+    /// Panics if the latencies mutex is poisoned.
+    #[must_use]
     pub fn stats(&self) -> TrafficStats {
         use std::sync::atomic::Ordering;
 
@@ -288,11 +328,13 @@ impl TrafficHandle {
     }
 
     /// Get total requests made so far
+    #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get error rate so far
+    #[must_use]
     pub fn error_rate(&self) -> f64 {
         self.stats().error_rate()
     }
@@ -304,12 +346,13 @@ impl TrafficHandle {
 /// - `"myapp"` → `"myapp"`
 /// - `"deployment/myapp"` → `"myapp"`
 /// - `"pod/worker-0"` → `"worker-0"`
+#[must_use]
 pub fn extract_resource_name(reference: &str) -> &str {
     // If there's a slash, take everything after it
     reference.split('/').next_back().unwrap_or(reference)
 }
 
-/// Create a deterministic suffix from label selectors for naming NetworkPolicies
+/// Create a deterministic suffix from label selectors for naming `NetworkPolicies`
 ///
 /// Uses a hash function to generate a collision-resistant 8-character hex suffix.
 /// Sorted keys ensure the same labels always produce the same suffix.
@@ -339,15 +382,18 @@ fn label_suffix(labels: &HashMap<String, String>) -> String {
 /// - `deployment`, `deploy` → Deployment
 /// - `pod`, `po` → Pod
 /// - `service`, `svc` → Service
-/// - `statefulset`, `sts` → StatefulSet
-/// - `daemonset`, `ds` → DaemonSet
+/// - `statefulset`, `sts` → `StatefulSet`
+/// - `daemonset`, `ds` → `DaemonSet`
+///
+/// # Errors
+///
+/// Returns `ContextError::InvalidResourceRef` if the reference format is invalid.
 pub fn parse_resource_ref(reference: &str) -> Result<(ResourceKind, &str), ContextError> {
     let parts: Vec<&str> = reference.splitn(2, '/').collect();
 
     if parts.len() != 2 {
         return Err(ContextError::InvalidResourceRef(format!(
-            "expected 'kind/name', got '{}'",
-            reference
+            "expected 'kind/name', got '{reference}'"
         )));
     }
 
@@ -356,8 +402,7 @@ pub fn parse_resource_ref(reference: &str) -> Result<(ResourceKind, &str), Conte
 
     if name.is_empty() {
         return Err(ContextError::InvalidResourceRef(format!(
-            "resource name cannot be empty in '{}'",
-            reference
+            "resource name cannot be empty in '{reference}'"
         )));
     }
 
@@ -369,8 +414,7 @@ pub fn parse_resource_ref(reference: &str) -> Result<(ResourceKind, &str), Conte
         "daemonset" | "ds" => ResourceKind::DaemonSet,
         _ => {
             return Err(ContextError::InvalidResourceRef(format!(
-                "unknown resource kind '{}' in '{}'",
-                kind_str, reference
+                "unknown resource kind '{kind_str}' in '{reference}'"
             )))
         }
     };
@@ -385,6 +429,10 @@ pub fn parse_resource_ref(reference: &str) -> Result<(ResourceKind, &str), Conte
 /// - `service/name`, `svc/name` → Forward to service (finds backing pod)
 /// - `deployment/name`, `deploy/name` → Forward to deployment (finds pod)
 /// - `name` → Treated as pod name (backward compatible)
+///
+/// # Errors
+///
+/// Returns `ContextError::InvalidResourceRef` if the target format is invalid.
 pub fn parse_forward_target(target: &str) -> Result<ForwardTarget, ContextError> {
     if target.is_empty() {
         return Err(ContextError::InvalidResourceRef(
@@ -396,8 +444,7 @@ pub fn parse_forward_target(target: &str) -> Result<ForwardTarget, ContextError>
     if let Some((kind, name)) = target.split_once('/') {
         if name.is_empty() {
             return Err(ContextError::InvalidResourceRef(format!(
-                "resource name cannot be empty in '{}'",
-                target
+                "resource name cannot be empty in '{target}'"
             )));
         }
 
@@ -406,8 +453,7 @@ pub fn parse_forward_target(target: &str) -> Result<ForwardTarget, ContextError>
             "service" | "svc" => Ok(ForwardTarget::Service(name.to_string())),
             "deployment" | "deploy" => Ok(ForwardTarget::Deployment(name.to_string())),
             _ => Err(ContextError::InvalidResourceRef(format!(
-                "unsupported resource kind '{}' for port forwarding (use pod, svc, or deployment)",
-                kind
+                "unsupported resource kind '{kind}' for port forwarding (use pod, svc, or deployment)"
             ))),
         }
     } else {
@@ -520,14 +566,11 @@ fn improve_error_message(err: &kube::Error, resource_kind: &str, resource_name: 
 
     // Parse common error patterns
     if raw.contains("NotFound") || raw.contains("404") {
-        return format!(
-            "{} '{}' not found in namespace",
-            resource_kind, resource_name
-        );
+        return format!("{resource_kind} '{resource_name}' not found in namespace");
     }
 
     if raw.contains("AlreadyExists") || raw.contains("409") {
-        return format!("{} '{}' already exists", resource_kind, resource_name);
+        return format!("{resource_kind} '{resource_name}' already exists");
     }
 
     if raw.contains("ImagePullBackOff") || raw.contains("ErrImagePull") {
@@ -536,37 +579,27 @@ fn improve_error_message(err: &kube::Error, resource_kind: &str, resource_name: 
             if let Some(end) = raw[start + 7..].find('"') {
                 let image = &raw[start + 7..start + 7 + end];
                 return format!(
-                    "{} '{}' failed: image '{}' not found or inaccessible",
-                    resource_kind, resource_name, image
+                    "{resource_kind} '{resource_name}' failed: image '{image}' not found or inaccessible"
                 );
             }
         }
-        return format!(
-            "{} '{}' failed: image pull error",
-            resource_kind, resource_name
-        );
+        return format!("{resource_kind} '{resource_name}' failed: image pull error");
     }
 
     if raw.contains("Forbidden") || raw.contains("403") {
-        return format!(
-            "{} '{}': permission denied (check RBAC)",
-            resource_kind, resource_name
-        );
+        return format!("{resource_kind} '{resource_name}': permission denied (check RBAC)");
     }
 
     if raw.contains("connection refused") || raw.contains("ECONNREFUSED") {
-        return format!(
-            "{} '{}': cannot connect to Kubernetes API",
-            resource_kind, resource_name
-        );
+        return format!("{resource_kind} '{resource_name}': cannot connect to Kubernetes API");
     }
 
     if raw.contains("timeout") || raw.contains("deadline exceeded") {
-        return format!("{} '{}': operation timed out", resource_kind, resource_name);
+        return format!("{resource_kind} '{resource_name}': operation timed out");
     }
 
     // For unrecognized errors, add context prefix
-    format!("{} '{}': {}", resource_kind, resource_name, raw)
+    format!("{resource_kind} '{resource_name}': {raw}")
 }
 
 impl Context {
@@ -574,6 +607,10 @@ impl Context {
     ///
     /// Creates a unique namespace in the cluster for this context.
     /// The namespace will be labeled with `seppo.io/test=true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ContextError` if client creation or namespace creation fails.
     pub async fn new() -> Result<Self, ContextError> {
         // 1. Create kube::Client
         let client = Client::try_default()
@@ -610,6 +647,10 @@ impl Context {
     }
 
     /// Cleanup the test namespace
+    ///
+    /// # Errors
+    ///
+    /// Returns `ContextError::CleanupError` if namespace deletion fails.
     pub async fn cleanup(&self) -> Result<(), ContextError> {
         let namespaces: Api<Namespace> = Api::all(self.client.clone());
 
@@ -683,12 +724,12 @@ impl Context {
     /// Apply a cluster-scoped resource (create or update)
     ///
     /// Use this for resources that are not namespaced, such as:
-    /// - ClusterRole, ClusterRoleBinding
-    /// - GatewayClass
-    /// - CustomResourceDefinition
+    /// - `ClusterRole`, `ClusterRoleBinding`
+    /// - `GatewayClass`
+    /// - `CustomResourceDefinition`
     /// - Namespace
-    /// - PersistentVolume
-    /// - StorageClass
+    /// - `PersistentVolume`
+    /// - `StorageClass`
     ///
     /// # Example
     ///
@@ -764,7 +805,7 @@ impl Context {
 
         for (key, path) in files {
             let content = fs::read(&path).await.map_err(|e| {
-                ContextError::ApplyError(format!("failed to read file {}: {}", path, e))
+                ContextError::ApplyError(format!("failed to read file {path}: {e}"))
             })?;
             data.insert(key, k8s_openapi::ByteString(content));
         }
@@ -844,12 +885,12 @@ impl Context {
         key_path: &str,
     ) -> Result<Secret, ContextError> {
         let cert_data = fs::read(cert_path).await.map_err(|e| {
-            ContextError::ApplyError(format!("failed to read certificate {}: {}", cert_path, e))
+            ContextError::ApplyError(format!("failed to read certificate {cert_path}: {e}"))
         })?;
 
-        let key_data = fs::read(key_path).await.map_err(|e| {
-            ContextError::ApplyError(format!("failed to read key {}: {}", key_path, e))
-        })?;
+        let key_data = fs::read(key_path)
+            .await
+            .map_err(|e| ContextError::ApplyError(format!("failed to read key {key_path}: {e}")))?;
 
         let mut data = std::collections::BTreeMap::new();
         data.insert("tls.crt".to_string(), k8s_openapi::ByteString(cert_data));
@@ -875,10 +916,10 @@ impl Context {
         self.apply(&secret).await
     }
 
-    /// Apply an RBACBundle (ServiceAccount, Role, RoleBinding)
+    /// Apply an `RBACBundle` (`ServiceAccount`, Role, `RoleBinding`)
     ///
     /// This is a convenience method for applying all three RBAC resources
-    /// created by the RBACBuilder.
+    /// created by the `RBACBuilder`.
     ///
     /// # Example
     ///
@@ -920,16 +961,16 @@ impl Context {
         Ok(())
     }
 
-    /// Create a NetworkPolicy that denies all ingress/egress to pods matching the selector
+    /// Create a `NetworkPolicy` that denies all ingress/egress to pods matching the selector
     ///
     /// This effectively isolates the selected pods from all network traffic.
     /// Useful for testing network segmentation or simulating network failures.
     ///
     /// # Cleanup
     ///
-    /// The NetworkPolicy is created in the context's namespace and will be automatically
+    /// The `NetworkPolicy` is created in the context's namespace and will be automatically
     /// deleted when the namespace is cleaned up via [`cleanup()`](Self::cleanup).
-    /// To remove isolation before cleanup, delete the returned NetworkPolicy using
+    /// To remove isolation before cleanup, delete the returned `NetworkPolicy` using
     /// [`delete()`](Self::delete) with the policy name from `metadata.name`.
     ///
     /// # Example
@@ -981,7 +1022,7 @@ impl Context {
         self.apply(&policy).await
     }
 
-    /// Create a NetworkPolicy that allows ingress from source pods to target pods
+    /// Create a `NetworkPolicy` that allows ingress from source pods to target pods
     ///
     /// # Example
     ///
@@ -1169,9 +1210,8 @@ impl Context {
         // Parse the JSON value into json_patch::Patch
         let json_patch: JsonPatchOps = serde_json::from_value(patch.clone()).map_err(|e| {
             ContextError::PatchError(format!(
-                "invalid JSON patch format: {}. Expected array of operations like \
-                 [{{\"op\": \"add\", \"path\": \"/path\", \"value\": ...}}]",
-                e
+                "invalid JSON patch format: {e}. Expected array of operations like \
+                 [{{\"op\": \"add\", \"path\": \"/path\", \"value\": ...}}]"
             ))
         })?;
 
@@ -1232,7 +1272,7 @@ impl Context {
 
         // Parse the JSON into a DynamicObject
         let mut dyn_obj: DynamicObject = serde_json::from_value(obj.clone())
-            .map_err(|e| ContextError::ApplyError(format!("invalid object format: {}", e)))?;
+            .map_err(|e| ContextError::ApplyError(format!("invalid object format: {e}")))?;
 
         // Ensure namespace is set
         if dyn_obj.metadata.namespace.is_none() {
@@ -1251,7 +1291,7 @@ impl Context {
                 api.replace(&name, &PostParams::default(), &dyn_obj)
                     .await
                     .map_err(|e| {
-                        ContextError::ApplyError(format!("failed to update {}: {}", name, e))
+                        ContextError::ApplyError(format!("failed to update {name}: {e}"))
                     })?
             }
             Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
@@ -1259,13 +1299,12 @@ impl Context {
                 api.create(&PostParams::default(), &dyn_obj)
                     .await
                     .map_err(|e| {
-                        ContextError::ApplyError(format!("failed to create {}: {}", name, e))
+                        ContextError::ApplyError(format!("failed to create {name}: {e}"))
                     })?
             }
             Err(e) => {
                 return Err(ContextError::ApplyError(format!(
-                    "failed to check {}: {}",
-                    name, e
+                    "failed to check {name}: {e}"
                 )));
             }
         };
@@ -1278,7 +1317,7 @@ impl Context {
         );
 
         serde_json::to_value(result)
-            .map_err(|e| ContextError::ApplyError(format!("failed to serialize result: {}", e)))
+            .map_err(|e| ContextError::ApplyError(format!("failed to serialize result: {e}")))
     }
 
     /// Get an unstructured resource using the dynamic client
@@ -1308,7 +1347,7 @@ impl Context {
         })?;
 
         serde_json::to_value(obj)
-            .map_err(|e| ContextError::GetError(format!("failed to serialize: {}", e)))
+            .map_err(|e| ContextError::GetError(format!("failed to serialize: {e}")))
     }
 
     /// Delete an unstructured resource using the dynamic client
@@ -1370,7 +1409,7 @@ impl Context {
             .into_iter()
             .map(|obj| {
                 serde_json::to_value(obj)
-                    .map_err(|e| ContextError::ListError(format!("failed to serialize: {}", e)))
+                    .map_err(|e| ContextError::ListError(format!("failed to serialize: {e}")))
             })
             .collect()
     }
@@ -1493,9 +1532,9 @@ impl Context {
         let kind = K::kind(&Default::default()).to_string();
 
         let list = api
-            .list(&Default::default())
+            .list(&ListParams::default())
             .await
-            .map_err(|e| ContextError::ListError(format!("failed to list {}: {}", kind, e)))?;
+            .map_err(|e| ContextError::ListError(format!("failed to list {kind}: {e}")))?;
 
         Ok(list.items)
     }
@@ -1505,7 +1544,7 @@ impl Context {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
 
         let logs = pods
-            .logs(pod_name, &Default::default())
+            .logs(pod_name, &LogParams::default())
             .await
             .map_err(|e| ContextError::LogsError(improve_error_message(&e, "Pod", pod_name)))?;
 
@@ -1560,7 +1599,7 @@ impl Context {
 
     /// Get logs from all pods matching a label selector
     ///
-    /// Returns a HashMap of pod name to logs. Useful for debugging deployments
+    /// Returns a `HashMap` of pod name to logs. Useful for debugging deployments
     /// with multiple replicas or getting logs from all pods in a service.
     ///
     /// # Arguments
@@ -1595,7 +1634,7 @@ impl Context {
             }
 
             // Try to get logs, but don't fail if a pod doesn't have logs yet
-            match pods.logs(&pod_name, &Default::default()).await {
+            match pods.logs(&pod_name, &LogParams::default()).await {
                 Ok(logs) => {
                     all_logs.insert(pod_name, logs);
                 }
@@ -1717,8 +1756,7 @@ impl Context {
 
             if start.elapsed() >= timeout {
                 return Err(ContextError::WaitTimeout(format!(
-                    "Timed out waiting for {} after {:?}",
-                    name, timeout
+                    "Timed out waiting for {name} after {timeout:?}"
                 )));
             }
 
@@ -1811,8 +1849,7 @@ impl Context {
 
             if start.elapsed() >= timeout {
                 return Err(ContextError::WaitTimeout(format!(
-                    "Timed out waiting for {} to be deleted after {:?}",
-                    name, timeout
+                    "Timed out waiting for {name} to be deleted after {timeout:?}"
                 )));
             }
 
@@ -1820,7 +1857,7 @@ impl Context {
         }
     }
 
-    /// Wait for a PersistentVolumeClaim to be bound
+    /// Wait for a `PersistentVolumeClaim` to be bound
     ///
     /// Polls until the PVC's status.phase is "Bound".
     /// Default timeout is 60 seconds, polling interval is 1 second.
@@ -1864,8 +1901,7 @@ impl Context {
                         .status
                         .as_ref()
                         .and_then(|s| s.phase.as_ref())
-                        .map(|p| p.as_str())
-                        .unwrap_or("Unknown");
+                        .map_or("Unknown", std::string::String::as_str);
 
                     if phase == "Bound" {
                         debug!(
@@ -1898,8 +1934,7 @@ impl Context {
 
             if start.elapsed() >= timeout {
                 return Err(ContextError::WaitTimeout(format!(
-                    "Timed out waiting for PVC {} to be bound after {:?}",
-                    name, timeout
+                    "Timed out waiting for PVC {name} to be bound after {timeout:?}"
                 )));
             }
 
@@ -1979,7 +2014,7 @@ impl Context {
         <K as kube::Resource>::DynamicType: Default + Clone,
     {
         let api: Api<K> = Api::namespaced(self.client.clone(), &self.namespace);
-        let field_selector = format!("metadata.name={}", name);
+        let field_selector = format!("metadata.name={name}");
         let config = watcher::Config::default().fields(&field_selector);
 
         debug!(
@@ -2075,10 +2110,9 @@ impl Context {
                         p.status
                             .as_ref()
                             .and_then(|s| s.container_statuses.as_ref())
-                            .map(|containers| {
+                            .is_some_and(|containers| {
                                 !containers.is_empty() && containers.iter().all(|c| c.ready)
                             })
-                            .unwrap_or(false)
                     },
                     timeout,
                 )
@@ -2104,12 +2138,8 @@ impl Context {
                 self.wait_for_with_timeout::<DaemonSet, _>(
                     name,
                     |d| {
-                        let desired = d
-                            .status
-                            .as_ref()
-                            .map(|s| s.desired_number_scheduled)
-                            .unwrap_or(0);
-                        let ready = d.status.as_ref().map(|s| s.number_ready).unwrap_or(0);
+                        let desired = d.status.as_ref().map_or(0, |s| s.desired_number_scheduled);
+                        let ready = d.status.as_ref().map_or(0, |s| s.number_ready);
                         desired > 0 && ready >= desired
                     },
                     timeout,
@@ -2172,8 +2202,7 @@ impl Context {
                 Ok(())
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
-                "kill only supports pods, got {:?}",
-                kind
+                "kill only supports pods, got {kind:?}"
             ))),
         }
     }
@@ -2192,8 +2221,7 @@ impl Context {
     pub async fn scale(&self, resource: &str, replicas: i32) -> Result<(), ContextError> {
         if replicas < 0 {
             return Err(ContextError::InvalidResourceRef(format!(
-                "replicas must be non-negative, got {}",
-                replicas
+                "replicas must be non-negative, got {replicas}"
             )));
         }
         let (kind, name) = parse_resource_ref(resource)?;
@@ -2225,15 +2253,14 @@ impl Context {
                 Ok(())
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
-                "scale only supports deployments, got {:?}",
-                kind
+                "scale only supports deployments, got {kind:?}"
             ))),
         }
     }
 
     /// Rollback a deployment to the previous revision
     ///
-    /// This finds the previous ReplicaSet revision and updates the deployment
+    /// This finds the previous `ReplicaSet` revision and updates the deployment
     /// to use that revision's pod template.
     ///
     /// # Example
@@ -2284,12 +2311,9 @@ impl Context {
                     .items
                     .into_iter()
                     .filter(|rs| {
-                        let owned = rs
-                            .metadata
-                            .owner_references
-                            .as_ref()
-                            .map(|refs| refs.iter().any(|r| r.uid.as_str() == dep_uid.as_str()))
-                            .unwrap_or(false);
+                        let owned = rs.metadata.owner_references.as_ref().is_some_and(|refs| {
+                            refs.iter().any(|r| r.uid.as_str() == dep_uid.as_str())
+                        });
                         let has_revision = get_revision(rs) > 0;
                         owned && has_revision
                     })
@@ -2341,8 +2365,7 @@ impl Context {
                 Ok(())
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
-                "rollback only supports deployments, got {:?}",
-                kind
+                "rollback only supports deployments, got {kind:?}"
             ))),
         }
     }
@@ -2416,15 +2439,14 @@ impl Context {
                 restart_workload!(api, "daemonset")
             }
             _ => Err(ContextError::InvalidResourceRef(format!(
-                "restart only supports deployment, statefulset, and daemonset, got {:?}",
-                kind
+                "restart only supports deployment, statefulset, and daemonset, got {kind:?}"
             ))),
         }
     }
 
     /// Check if the current user has permission to perform an action
     ///
-    /// Uses the Kubernetes SelfSubjectAccessReview API to check RBAC permissions.
+    /// Uses the Kubernetes `SelfSubjectAccessReview` API to check RBAC permissions.
     /// Useful for tests that need to verify RBAC configuration.
     ///
     /// # Arguments
@@ -2444,7 +2466,7 @@ impl Context {
     /// ```
     pub async fn can_i(&self, verb: &str, resource: &str) -> Result<bool, ContextError> {
         let review = SelfSubjectAccessReview {
-            metadata: Default::default(),
+            metadata: ObjectMeta::default(),
             spec: SelfSubjectAccessReviewSpec {
                 resource_attributes: Some(ResourceAttributes {
                     namespace: Some(self.namespace.clone()),
@@ -2461,9 +2483,9 @@ impl Context {
         let result = api
             .create(&PostParams::default(), &review)
             .await
-            .map_err(|e| ContextError::GetError(format!("RBAC check failed: {}", e)))?;
+            .map_err(|e| ContextError::GetError(format!("RBAC check failed: {e}")))?;
 
-        let allowed = result.status.map(|s| s.allowed).unwrap_or(false);
+        let allowed = result.status.is_some_and(|s| s.allowed);
 
         debug!(
             verb = %verb,
@@ -2483,7 +2505,7 @@ impl Context {
         let events: Api<Event> = Api::namespaced(self.client.clone(), &self.namespace);
 
         let list = events
-            .list(&Default::default())
+            .list(&ListParams::default())
             .await
             .map_err(|e| ContextError::EventsError(e.to_string()))?;
 
@@ -2498,7 +2520,7 @@ impl Context {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
 
         let pod_list = pods
-            .list(&Default::default())
+            .list(&ListParams::default())
             .await
             .map_err(|e| ContextError::ListError(e.to_string()))?;
 
@@ -2511,9 +2533,9 @@ impl Context {
             }
 
             // Try to get logs, but don't fail if pod isn't ready
-            let logs = match pods.logs(&pod_name, &Default::default()).await {
+            let logs = match pods.logs(&pod_name, &LogParams::default()).await {
                 Ok(logs) => logs,
-                Err(e) => format!("[error getting logs: {}]", e),
+                Err(e) => format!("[error getting logs: {e}]"),
             };
 
             logs_map.insert(pod_name, logs);
@@ -2569,7 +2591,7 @@ impl Context {
         };
 
         // Convert &[&str] to Vec<String> for kube API
-        let command_strings: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+        let command_strings: Vec<String> = command.iter().map(|s| (*s).to_string()).collect();
 
         let mut attached = pods
             .exec(pod_name, command_strings, &attach_params)
@@ -2616,9 +2638,7 @@ impl Context {
         let output = self
             .exec(pod_name, &["cat", remote_path])
             .await
-            .map_err(|e| {
-                ContextError::CopyError(format!("failed to read {}: {}", remote_path, e))
-            })?;
+            .map_err(|e| ContextError::CopyError(format!("failed to read {remote_path}: {e}")))?;
 
         debug!(
             namespace = %self.namespace,
@@ -2656,21 +2676,18 @@ impl Context {
             || remote_path.contains('\r')
         {
             return Err(ContextError::CopyError(format!(
-                "invalid path '{}': contains shell metacharacters",
-                remote_path
+                "invalid path '{remote_path}': contains shell metacharacters"
             )));
         }
 
         // Escape content and path for shell
         let escaped_content = content.replace('\'', "'\"'\"'");
         let escaped_path = remote_path.replace('\'', "'\"'\"'");
-        let command = format!("printf '%s' '{}' > '{}'", escaped_content, escaped_path);
+        let command = format!("printf '%s' '{escaped_content}' > '{escaped_path}'");
 
         self.exec(pod_name, &["sh", "-c", &command])
             .await
-            .map_err(|e| {
-                ContextError::CopyError(format!("failed to write {}: {}", remote_path, e))
-            })?;
+            .map_err(|e| ContextError::CopyError(format!("failed to write {remote_path}: {e}")))?;
 
         debug!(
             namespace = %self.namespace,
@@ -2780,7 +2797,7 @@ impl Context {
         let svc = services
             .get(svc_name)
             .await
-            .map_err(|e| ContextError::GetError(format!("service '{}': {}", svc_name, e)))?;
+            .map_err(|e| ContextError::GetError(format!("service '{svc_name}': {e}")))?;
 
         // Get the selector from the service
         let selector = svc
@@ -2788,7 +2805,7 @@ impl Context {
             .as_ref()
             .and_then(|s| s.selector.as_ref())
             .ok_or_else(|| {
-                ContextError::GetError(format!("service '{}' has no selector", svc_name))
+                ContextError::GetError(format!("service '{svc_name}' has no selector"))
             })?;
 
         self.find_running_pod_by_labels(selector).await
@@ -2800,7 +2817,7 @@ impl Context {
         let deploy = deployments
             .get(deploy_name)
             .await
-            .map_err(|e| ContextError::GetError(format!("deployment '{}': {}", deploy_name, e)))?;
+            .map_err(|e| ContextError::GetError(format!("deployment '{deploy_name}': {e}")))?;
 
         // Get the selector from the deployment
         let selector = deploy
@@ -2808,7 +2825,7 @@ impl Context {
             .as_ref()
             .and_then(|s| s.selector.match_labels.as_ref())
             .ok_or_else(|| {
-                ContextError::GetError(format!("deployment '{}' has no selector", deploy_name))
+                ContextError::GetError(format!("deployment '{deploy_name}' has no selector"))
             })?;
 
         self.find_running_pod_by_labels(selector).await
@@ -2824,7 +2841,7 @@ impl Context {
         // Build label selector string
         let label_selector = labels
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(",");
 
@@ -2840,7 +2857,7 @@ impl Context {
                 .status
                 .as_ref()
                 .and_then(|s| s.phase.as_ref())
-                .map(|s| s.as_str());
+                .map(std::string::String::as_str);
 
             if phase == Some("Running") {
                 if let Some(name) = pod.metadata.name {
@@ -2850,8 +2867,7 @@ impl Context {
         }
 
         Err(ContextError::GetError(format!(
-            "no running pod found with labels: {}",
-            label_selector
+            "no running pod found with labels: {label_selector}"
         )))
     }
 
@@ -3047,14 +3063,13 @@ impl Context {
         // Find a pod from this deployment
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let pod_list = pods
-            .list(&ListParams::default().labels(&format!("app={}", name)))
+            .list(&ListParams::default().labels(&format!("app={name}")))
             .await
-            .map_err(|e| ContextError::ListError(format!("failed to list pods: {}", e)))?;
+            .map_err(|e| ContextError::ListError(format!("failed to list pods: {e}")))?;
 
         if pod_list.items.is_empty() {
             return Err(ContextError::ListError(format!(
-                "no pods found for deployment {}",
-                name
+                "no pods found for deployment {name}"
             )));
         }
 
@@ -3072,7 +3087,7 @@ impl Context {
             "Killing pod for self-healing test"
         );
 
-        self.kill(&format!("pod/{}", pod_name)).await?;
+        self.kill(&format!("pod/{pod_name}")).await?;
 
         // Wait for recovery
         self.wait_ready_with_timeout(resource, recovery_timeout)
@@ -3167,12 +3182,12 @@ impl Context {
                 .build()
                 .unwrap();
 
-            let interval = std::time::Duration::from_secs_f64(1.0 / rps as f64);
+            let interval = std::time::Duration::from_secs_f64(1.0 / f64::from(rps));
             let deadline = std::time::Instant::now() + duration;
 
             while std::time::Instant::now() < deadline && !stop_flag_clone.load(Ordering::Relaxed) {
                 let start = std::time::Instant::now();
-                let url = format!("http://127.0.0.1:{}{}", local_port, endpoint);
+                let url = format!("http://127.0.0.1:{local_port}{endpoint}");
 
                 let result = client.get(&url).send().await;
                 let latency = start.elapsed();
@@ -3210,6 +3225,7 @@ impl Context {
     /// ctx.assert_pod("my-pod").is_running().await?;
     /// ctx.assert_pod("my-pod").has_label("app", "myapp").await?;
     /// ```
+    #[must_use]
     pub fn assert_pod(&self, name: &str) -> crate::assertions::PodAssertion {
         crate::assertions::PodAssertion::new(
             self.client.clone(),
@@ -3226,6 +3242,7 @@ impl Context {
     /// ctx.assert_deployment("my-app").has_replicas(3).await?;
     /// ctx.assert_deployment("my-app").is_available().await?;
     /// ```
+    #[must_use]
     pub fn assert_deployment(&self, name: &str) -> crate::assertions::DeploymentAssertion {
         crate::assertions::DeploymentAssertion::new(
             self.client.clone(),
@@ -3242,6 +3259,7 @@ impl Context {
     /// ctx.assert_service("my-svc").has_port(8080).await?;
     /// ctx.assert_service("my-svc").is_cluster_ip().await?;
     /// ```
+    #[must_use]
     pub fn assert_service(&self, name: &str) -> crate::assertions::ServiceAssertion {
         crate::assertions::ServiceAssertion::new(
             self.client.clone(),
@@ -3259,6 +3277,7 @@ impl Context {
     /// ctx.assert_pvc("my-data").has_storage_class("standard").await?;
     /// ctx.assert_pvc("my-data").has_capacity("10Gi").await?;
     /// ```
+    #[must_use]
     pub fn assert_pvc(&self, name: &str) -> crate::assertions::PvcAssertion {
         crate::assertions::PvcAssertion::new(
             self.client.clone(),
@@ -3336,7 +3355,7 @@ impl Context {
         };
 
         println!();
-        println!("=== {}/{} ===", kind_name, name);
+        println!("=== {kind_name}/{name} ===");
 
         match kind {
             ResourceKind::Deployment => self.debug_deployment(name).await?,
@@ -3357,10 +3376,10 @@ impl Context {
                 let status = d.status.as_ref();
                 let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
                 let desired = d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
-                println!("Status: {}/{} ready", ready, desired);
+                println!("Status: {ready}/{desired} ready");
             }
             Err(e) => {
-                println!("Error fetching deployment: {}", e);
+                println!("Error fetching deployment: {e}");
             }
         }
 
@@ -3381,15 +3400,13 @@ impl Context {
                     .status
                     .as_ref()
                     .and_then(|s| s.phase.as_ref())
-                    .map(|s| s.as_str())
-                    .unwrap_or("Unknown");
+                    .map_or("Unknown", std::string::String::as_str);
                 let restarts: i32 = p
                     .status
                     .as_ref()
                     .and_then(|s| s.container_statuses.as_ref())
-                    .map(|cs| cs.iter().map(|c| c.restart_count).sum())
-                    .unwrap_or(0);
-                println!("Phase: {} ({} restarts)", phase, restarts);
+                    .map_or(0, |cs| cs.iter().map(|c| c.restart_count).sum());
+                println!("Phase: {phase} ({restarts} restarts)");
 
                 // Print container statuses
                 if let Some(statuses) = p
@@ -3406,7 +3423,7 @@ impl Context {
                 }
             }
             Err(e) => {
-                println!("Error fetching pod: {}", e);
+                println!("Error fetching pod: {e}");
             }
         }
 
@@ -3425,11 +3442,11 @@ impl Context {
                     .into_iter()
                     .rev()
                 {
-                    println!("  {}", line);
+                    println!("  {line}");
                 }
             }
             Err(e) => {
-                println!("Error fetching logs: {}", e);
+                println!("Error fetching logs: {e}");
             }
         }
 
@@ -3445,19 +3462,18 @@ impl Context {
                     .spec
                     .as_ref()
                     .and_then(|s| s.type_.as_ref())
-                    .map(|s| s.as_str())
-                    .unwrap_or("ClusterIP");
+                    .map_or("ClusterIP", std::string::String::as_str);
                 let ports: Vec<String> = s
                     .spec
                     .as_ref()
                     .and_then(|s| s.ports.as_ref())
                     .map(|ps| ps.iter().map(|p| format!("{}", p.port)).collect())
                     .unwrap_or_default();
-                println!("Type: {}", svc_type);
+                println!("Type: {svc_type}");
                 println!("Ports: {}", ports.join(", "));
             }
             Err(e) => {
-                println!("Error fetching service: {}", e);
+                println!("Error fetching service: {e}");
             }
         }
 
@@ -3472,12 +3488,12 @@ impl Context {
         match ds.get(name).await {
             Ok(d) => {
                 let status = d.status.as_ref();
-                let ready = status.map(|s| s.number_ready).unwrap_or(0);
-                let desired = status.map(|s| s.desired_number_scheduled).unwrap_or(0);
-                println!("Status: {}/{} ready", ready, desired);
+                let ready = status.map_or(0, |s| s.number_ready);
+                let desired = status.map_or(0, |s| s.desired_number_scheduled);
+                println!("Status: {ready}/{desired} ready");
             }
             Err(e) => {
-                println!("Error fetching daemonset: {}", e);
+                println!("Error fetching daemonset: {e}");
             }
         }
 
@@ -3495,10 +3511,10 @@ impl Context {
                 let status = s.status.as_ref();
                 let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
                 let desired = s.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
-                println!("Status: {}/{} ready", ready, desired);
+                println!("Status: {ready}/{desired} ready");
             }
             Err(e) => {
-                println!("Error fetching statefulset: {}", e);
+                println!("Error fetching statefulset: {e}");
             }
         }
 
@@ -3510,7 +3526,7 @@ impl Context {
 
     async fn debug_pods_for_app(&self, app_name: &str) -> Result<(), ContextError> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let lp = ListParams::default().labels(&format!("app={}", app_name));
+        let lp = ListParams::default().labels(&format!("app={app_name}"));
 
         match pods.list(&lp).await {
             Ok(pod_list) => {
@@ -3523,20 +3539,18 @@ impl Context {
                             .status
                             .as_ref()
                             .and_then(|s| s.phase.as_ref())
-                            .map(|s| s.as_str())
-                            .unwrap_or("Unknown");
+                            .map_or("Unknown", std::string::String::as_str);
                         let restarts: i32 = p
                             .status
                             .as_ref()
                             .and_then(|s| s.container_statuses.as_ref())
-                            .map(|cs| cs.iter().map(|c| c.restart_count).sum())
-                            .unwrap_or(0);
-                        println!("  {}: {} ({} restarts)", name, phase, restarts);
+                            .map_or(0, |cs| cs.iter().map(|c| c.restart_count).sum());
+                        println!("  {name}: {phase} ({restarts} restarts)");
                     }
                 }
             }
             Err(e) => {
-                println!("Error listing pods: {}", e);
+                println!("Error listing pods: {e}");
             }
         }
 
@@ -3567,12 +3581,12 @@ impl Context {
                         } else {
                             msg.to_string()
                         };
-                        println!("  {}: {}", reason, msg);
+                        println!("  {reason}: {msg}");
                     }
                 }
             }
             Err(e) => {
-                println!("Error fetching events: {}", e);
+                println!("Error fetching events: {e}");
             }
         }
 
@@ -3581,37 +3595,31 @@ impl Context {
 
     async fn debug_logs_for_app(&self, app_name: &str) -> Result<(), ContextError> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let lp = ListParams::default().labels(&format!("app={}", app_name));
+        let lp = ListParams::default().labels(&format!("app={app_name}"));
 
-        match pods.list(&lp).await {
-            Ok(pod_list) => {
-                for p in pod_list.items.iter().take(2) {
-                    // Limit to first 2 pods
-                    let name = p.metadata.name.as_deref().unwrap_or("unknown");
-                    match self.logs(name).await {
-                        Ok(logs) => {
-                            println!();
-                            println!("=== Logs [{}] (last 20 lines) ===", name);
-                            for line in logs
-                                .lines()
-                                .rev()
-                                .take(20)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
-                            {
-                                println!("  {}", line);
-                            }
-                        }
-                        Err(_) => {
-                            // Skip pods without logs
-                        }
+        if let Ok(pod_list) = pods.list(&lp).await {
+            for p in pod_list.items.iter().take(2) {
+                // Limit to first 2 pods
+                let name = p.metadata.name.as_deref().unwrap_or("unknown");
+                if let Ok(logs) = self.logs(name).await {
+                    println!();
+                    println!("=== Logs [{name}] (last 20 lines) ===");
+                    for line in logs
+                        .lines()
+                        .rev()
+                        .take(20)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                    {
+                        println!("  {line}");
                     }
+                } else {
+                    // Skip pods without logs
                 }
             }
-            Err(_) => {
-                // Silently skip if we can't list pods
-            }
+        } else {
+            // Silently skip if we can't list pods
         }
 
         Ok(())
@@ -3631,6 +3639,7 @@ impl Context {
     ///     .expect_tls("api-tls-secret")
     ///     .must();
     /// ```
+    #[must_use]
     pub fn test_ingress(&self, name: &str) -> IngressTest {
         IngressTest::new(
             self.client.clone(),
@@ -3679,6 +3688,7 @@ impl IngressTest {
     }
 
     /// Set the host to test
+    #[must_use]
     pub fn host(mut self, host: &str) -> Self {
         if self.err.is_some() {
             return self;
@@ -3688,6 +3698,7 @@ impl IngressTest {
     }
 
     /// Set the path to test
+    #[must_use]
     pub fn path(mut self, path: &str) -> Self {
         if self.err.is_some() {
             return self;
@@ -3708,12 +3719,9 @@ impl IngressTest {
             Ok(ingress) => {
                 let expected_svc = backend.strip_prefix("svc/").unwrap_or(backend);
 
-                let spec = match ingress.spec {
-                    Some(s) => s,
-                    None => {
-                        self.err = Some(format!("Ingress {} has no spec", self.name));
-                        return self;
-                    }
+                let Some(spec) = ingress.spec else {
+                    self.err = Some(format!("Ingress {} has no spec", self.name));
+                    return self;
                 };
 
                 let mut found = false;
@@ -3796,12 +3804,9 @@ impl IngressTest {
 
         match api.get(&self.name).await {
             Ok(ingress) => {
-                let spec = match ingress.spec {
-                    Some(s) => s,
-                    None => {
-                        self.err = Some(format!("Ingress {} has no spec", self.name));
-                        return self;
-                    }
+                let Some(spec) = ingress.spec else {
+                    self.err = Some(format!("Ingress {} has no spec", self.name));
+                    return self;
                 };
 
                 let mut found = false;
@@ -3840,6 +3845,7 @@ impl IngressTest {
     }
 
     /// Get any error from the test chain
+    #[must_use]
     pub fn error(&self) -> Option<&str> {
         self.err.as_deref()
     }
@@ -3847,18 +3853,18 @@ impl IngressTest {
     /// Panic if there was an error in the test chain
     pub fn must(self) {
         if let Some(err) = self.err {
-            panic!("IngressTest failed: {}", err);
+            panic!("IngressTest failed: {err}");
         }
     }
 }
 
-/// Bundle containing ServiceAccount, Role, and RoleBinding for RBAC setup
+/// Bundle containing `ServiceAccount`, Role, and `RoleBinding` for RBAC setup
 pub struct RBACBundle {
-    /// The ServiceAccount
+    /// The `ServiceAccount`
     pub service_account: ServiceAccount,
     /// The Role defining permissions
     pub role: Role,
-    /// The RoleBinding connecting ServiceAccount to Role
+    /// The `RoleBinding` connecting `ServiceAccount` to Role
     pub role_binding: RoleBinding,
 }
 
@@ -3883,16 +3889,18 @@ pub struct RBACBuilder {
 }
 
 impl RBACBuilder {
-    /// Create a new RBACBuilder with the given ServiceAccount name
+    /// Create a new `RBACBuilder` with the given `ServiceAccount` name
+    #[must_use]
     pub fn service_account(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            role_name: format!("{}-role", name),
+            role_name: format!("{name}-role"),
             rules: Vec::new(),
         }
     }
 
     /// Set a custom role name
+    #[must_use]
     pub fn with_role(mut self, role_name: &str) -> Self {
         self.role_name = role_name.to_string();
         self
@@ -3904,7 +3912,7 @@ impl RBACBuilder {
         let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
         for res in resources {
             let group = api_group_for_resource(res);
-            by_group.entry(group).or_default().push(res.to_string());
+            by_group.entry(group).or_default().push((*res).to_string());
         }
 
         // Create separate rules for each API group
@@ -3912,37 +3920,42 @@ impl RBACBuilder {
             self.rules.push(PolicyRule {
                 api_groups: Some(vec![group]),
                 resources: Some(group_resources),
-                verbs: verbs.iter().map(|v| v.to_string()).collect(),
+                verbs: verbs.iter().map(|v| (*v).to_string()).collect(),
                 ..Default::default()
             });
         }
     }
 
     /// Add get permission for the specified resources
+    #[must_use]
     pub fn can_get(mut self, resources: &[&str]) -> Self {
         self.add_rule(&["get"], resources);
         self
     }
 
     /// Add list permission for the specified resources
+    #[must_use]
     pub fn can_list(mut self, resources: &[&str]) -> Self {
         self.add_rule(&["list"], resources);
         self
     }
 
     /// Add watch permission for the specified resources
+    #[must_use]
     pub fn can_watch(mut self, resources: &[&str]) -> Self {
         self.add_rule(&["watch"], resources);
         self
     }
 
     /// Add create permission for the specified resources
+    #[must_use]
     pub fn can_create(mut self, resources: &[&str]) -> Self {
         self.add_rule(&["create"], resources);
         self
     }
 
     /// Add update permission for the specified resources
+    #[must_use]
     pub fn can_update<I, S>(mut self, resources: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -3952,12 +3965,16 @@ impl RBACBuilder {
             .into_iter()
             .map(|r| r.as_ref().to_string())
             .collect();
-        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        let resource_refs: Vec<&str> = resource_strings
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         self.add_rule(&["update"], &resource_refs);
         self
     }
 
     /// Add delete permission for the specified resources
+    #[must_use]
     pub fn can_delete<I, S>(mut self, resources: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -3967,12 +3984,16 @@ impl RBACBuilder {
             .into_iter()
             .map(|r| r.as_ref().to_string())
             .collect();
-        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        let resource_refs: Vec<&str> = resource_strings
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         self.add_rule(&["delete"], &resource_refs);
         self
     }
 
     /// Add all permissions (get, list, watch, create, update, delete) for resources
+    #[must_use]
     pub fn can_all<I, S>(mut self, resources: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -3982,7 +4003,10 @@ impl RBACBuilder {
             .into_iter()
             .map(|r| r.as_ref().to_string())
             .collect();
-        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        let resource_refs: Vec<&str> = resource_strings
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         self.add_rule(
             &["get", "list", "watch", "create", "update", "delete"],
             &resource_refs,
@@ -3991,6 +4015,7 @@ impl RBACBuilder {
     }
 
     /// Add custom verbs for the specified resources
+    #[must_use]
     pub fn can<IV, IS, VV, VS>(mut self, verbs: IV, resources: IS) -> Self
     where
         IV: IntoIterator<Item = VV>,
@@ -3999,19 +4024,26 @@ impl RBACBuilder {
         VS: AsRef<str>,
     {
         let verb_strings: Vec<String> = verbs.into_iter().map(|v| v.as_ref().to_string()).collect();
-        let verb_refs: Vec<&str> = verb_strings.iter().map(|s| s.as_str()).collect();
+        let verb_refs: Vec<&str> = verb_strings
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
 
         let resource_strings: Vec<String> = resources
             .into_iter()
             .map(|r| r.as_ref().to_string())
             .collect();
-        let resource_refs: Vec<&str> = resource_strings.iter().map(|s| s.as_str()).collect();
+        let resource_refs: Vec<&str> = resource_strings
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
 
         self.add_rule(&verb_refs, &resource_refs);
         self
     }
 
     /// Add a rule with explicit API group for custom resources (CRDs)
+    #[must_use]
     pub fn for_api_group<IV, VV, IR, VR>(
         mut self,
         api_group: &str,
@@ -4038,7 +4070,8 @@ impl RBACBuilder {
         self
     }
 
-    /// Build the RBACBundle with ServiceAccount, Role, and RoleBinding
+    /// Build the `RBACBundle` with `ServiceAccount`, Role, and `RoleBinding`
+    #[must_use]
     pub fn build(self) -> RBACBundle {
         RBACBundle {
             service_account: ServiceAccount {
@@ -4084,10 +4117,10 @@ fn lookup_env_vars(keys: &[&str]) -> Result<HashMap<String, String>, String> {
     for key in keys {
         match std::env::var(key) {
             Ok(value) => {
-                data.insert(key.to_string(), value);
+                data.insert((*key).to_string(), value);
             }
             Err(_) => {
-                return Err(format!("environment variable {} is not set", key));
+                return Err(format!("environment variable {key} is not set"));
             }
         }
     }
@@ -4095,6 +4128,7 @@ fn lookup_env_vars(keys: &[&str]) -> Result<HashMap<String, String>, String> {
 }
 
 /// Returns the correct API group for a resource
+#[allow(clippy::match_same_arms)] // Explicit core resources for documentation
 fn api_group_for_resource(resource: &str) -> String {
     match resource {
         // Core API group ("")

@@ -24,7 +24,7 @@ use std::time::Duration;
 /// A simplified event for wait error context
 #[derive(Debug, Clone)]
 pub struct WaitEvent {
-    /// Event reason (e.g., "Pulling", "BackOff", "FailedScheduling")
+    /// Event reason (e.g., "Pulling", "`BackOff`", "`FailedScheduling`")
     pub reason: String,
     /// Event message
     pub message: String,
@@ -48,7 +48,7 @@ pub struct WaitError {
 }
 
 impl WaitError {
-    /// Create a new WaitError
+    /// Create a new `WaitError`
     pub fn new(resource: impl Into<String>, timeout: Duration, elapsed: Duration) -> Self {
         Self {
             resource: resource.into(),
@@ -60,12 +60,14 @@ impl WaitError {
     }
 
     /// Set the last observed state
+    #[must_use]
     pub fn with_state(mut self, state: impl Into<String>) -> Self {
         self.last_state = state.into();
         self
     }
 
     /// Add events to the error
+    #[must_use]
     pub fn with_events(mut self, events: Vec<WaitEvent>) -> Self {
         self.events = events;
         self
@@ -126,15 +128,9 @@ impl ResourceState for k8s_openapi::api::apps::v1::Deployment {
             .unwrap_or(0);
 
         if unavailable > 0 {
-            format!(
-                "{}/{} ready, {} unavailable",
-                ready, spec_replicas, unavailable
-            )
+            format!("{ready}/{spec_replicas} ready, {unavailable} unavailable")
         } else {
-            format!(
-                "{}/{} ready, {}/{} available",
-                ready, spec_replicas, available, spec_replicas
-            )
+            format!("{ready}/{spec_replicas} ready, {available}/{spec_replicas} available")
         }
     }
 }
@@ -145,8 +141,7 @@ impl ResourceState for k8s_openapi::api::core::v1::Pod {
             .status
             .as_ref()
             .and_then(|s| s.phase.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
+            .map_or("Unknown", std::string::String::as_str);
 
         let containers = self
             .status
@@ -169,7 +164,9 @@ impl ResourceState for k8s_openapi::api::core::v1::Pod {
                     })
                     .collect();
 
-                if !waiting_reasons.is_empty() {
+                if waiting_reasons.is_empty() {
+                    format!("phase={phase}, containers {ready}/{total} ready")
+                } else {
                     format!(
                         "phase={}, containers {}/{} ready, waiting: {}",
                         phase,
@@ -177,11 +174,9 @@ impl ResourceState for k8s_openapi::api::core::v1::Pod {
                         total,
                         waiting_reasons.join(", ")
                     )
-                } else {
-                    format!("phase={}, containers {}/{} ready", phase, ready, total)
                 }
             }
-            None => format!("phase={}, no container status", phase),
+            None => format!("phase={phase}, no container status"),
         }
     }
 }
@@ -200,10 +195,7 @@ impl ResourceState for k8s_openapi::api::apps::v1::StatefulSet {
             .and_then(|s| s.current_replicas)
             .unwrap_or(0);
 
-        format!(
-            "{}/{} ready, {}/{} current",
-            ready, spec_replicas, current, spec_replicas
-        )
+        format!("{ready}/{spec_replicas} ready, {current}/{spec_replicas} current")
     }
 }
 
@@ -212,19 +204,15 @@ impl ResourceState for k8s_openapi::api::apps::v1::DaemonSet {
         let desired = self
             .status
             .as_ref()
-            .map(|s| s.desired_number_scheduled)
-            .unwrap_or(0);
-        let ready = self.status.as_ref().map(|s| s.number_ready).unwrap_or(0);
+            .map_or(0, |s| s.desired_number_scheduled);
+        let ready = self.status.as_ref().map_or(0, |s| s.number_ready);
         let available = self
             .status
             .as_ref()
             .and_then(|s| s.number_available)
             .unwrap_or(0);
 
-        format!(
-            "{}/{} ready, {}/{} available",
-            ready, desired, available, desired
-        )
+        format!("{ready}/{desired} ready, {available}/{desired} available")
     }
 }
 

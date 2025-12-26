@@ -169,7 +169,7 @@ fn format_memory(bytes: u64) -> String {
     } else if bytes >= 1024 {
         format!("{}Ki", bytes / 1024)
     } else {
-        format!("{}", bytes)
+        format!("{bytes}")
     }
 }
 

@@ -58,6 +58,10 @@ pub trait ClusterProvider: Send + Sync {
 }
 
 /// Get the appropriate provider for the given config
+///
+/// # Errors
+///
+/// Currently infallible, but returns `Result` for future extensibility.
 pub fn get_provider(config: &ClusterConfig) -> Result<Box<dyn ClusterProvider>, ProviderError> {
     match config.provider {
         ClusterProviderType::Kind => Ok(Box::new(KindProvider::new())),

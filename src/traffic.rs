@@ -46,6 +46,7 @@ pub struct HttpAssert<'a> {
 
 impl<'a> HttpAssert<'a> {
     /// Create a new HTTP assertion builder
+    #[must_use]
     pub fn new(response: &'a str) -> Self {
         Self {
             response,
@@ -54,6 +55,7 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Assert the response contains expected text
+    #[must_use]
     pub fn contains(mut self, expected: &str) -> Self {
         if !self.response.contains(expected) {
             self.errors.push(format!(
@@ -66,24 +68,25 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Assert the response does not contain text
+    #[must_use]
     pub fn not_contains(mut self, unexpected: &str) -> Self {
         if self.response.contains(unexpected) {
             self.errors.push(format!(
-                "expected response to NOT contain '{}', but it did",
-                unexpected
+                "expected response to NOT contain '{unexpected}', but it did"
             ));
         }
         self
     }
 
     /// Assert the response contains a JSON key-value pair
+    #[must_use]
     pub fn contains_json(mut self, key: &str, value: &str) -> Self {
         // Simple JSON check - looks for "key": "value" or "key":"value"
         let patterns = [
-            format!("\"{}\":\"{}\"", key, value),
-            format!("\"{}\": \"{}\"", key, value),
-            format!("\"{}\":{}", key, value),
-            format!("\"{}\": {}", key, value),
+            format!("\"{key}\":\"{value}\""),
+            format!("\"{key}\": \"{value}\""),
+            format!("\"{key}\":{value}"),
+            format!("\"{key}\": {value}"),
         ];
 
         let found = patterns.iter().any(|p| self.response.contains(p));
@@ -99,6 +102,7 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Assert the response is valid JSON
+    #[must_use]
     pub fn is_json(mut self) -> Self {
         if serde_json::from_str::<serde_json::Value>(self.response).is_err() {
             self.errors.push(format!(
@@ -110,6 +114,7 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Assert the response matches expected exactly
+    #[must_use]
     pub fn equals(mut self, expected: &str) -> Self {
         if self.response != expected {
             self.errors.push(format!(
@@ -122,6 +127,7 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Assert the response is empty
+    #[must_use]
     pub fn is_empty(mut self) -> Self {
         if !self.response.is_empty() {
             self.errors.push(format!(
@@ -133,6 +139,7 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Assert the response is not empty
+    #[must_use]
     pub fn is_not_empty(mut self) -> Self {
         if self.response.is_empty() {
             self.errors
@@ -142,6 +149,10 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Check all assertions and return result
+    ///
+    /// # Errors
+    ///
+    /// Returns `TrafficError::AssertionFailed` if any assertions failed.
     pub fn result(self) -> Result<(), TrafficError> {
         if self.errors.is_empty() {
             Ok(())
@@ -151,10 +162,16 @@ impl<'a> HttpAssert<'a> {
     }
 
     /// Check all assertions, panicking on failure
+    ///
+    /// # Panics
+    ///
+    /// Panics if any assertions failed.
     pub fn assert(self) {
-        if !self.errors.is_empty() {
-            panic!("HTTP assertion failed: {}", self.errors.join("; "));
-        }
+        assert!(
+            self.errors.is_empty(),
+            "HTTP assertion failed: {}",
+            self.errors.join("; ")
+        );
     }
 }
 
@@ -179,6 +196,7 @@ pub struct TrafficRecorder {
 
 impl TrafficRecorder {
     /// Create a new traffic recorder
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -194,21 +212,25 @@ impl TrafficRecorder {
     }
 
     /// Get all recorded requests
+    #[must_use]
     pub fn requests(&self) -> &[RequestRecord] {
         &self.requests
     }
 
     /// Get count of requests
+    #[must_use]
     pub fn count(&self) -> usize {
         self.requests.len()
     }
 
     /// Get requests by path
+    #[must_use]
     pub fn by_path(&self, path: &str) -> Vec<&RequestRecord> {
         self.requests.iter().filter(|r| r.path == path).collect()
     }
 
     /// Get requests by method
+    #[must_use]
     pub fn by_method(&self, method: &str) -> Vec<&RequestRecord> {
         self.requests
             .iter()
@@ -217,6 +239,8 @@ impl TrafficRecorder {
     }
 
     /// Get average response time
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)] // Request count won't exceed u32::MAX
     pub fn avg_duration(&self) -> Option<Duration> {
         if self.requests.is_empty() {
             None
@@ -227,11 +251,13 @@ impl TrafficRecorder {
     }
 
     /// Get max response time
+    #[must_use]
     pub fn max_duration(&self) -> Option<Duration> {
         self.requests.iter().map(|r| r.duration).max()
     }
 
     /// Get min response time
+    #[must_use]
     pub fn min_duration(&self) -> Option<Duration> {
         self.requests.iter().map(|r| r.duration).min()
     }

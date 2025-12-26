@@ -21,6 +21,10 @@ use crate::provider::{ClusterProvider, KindProvider};
 ///
 /// For more control, use `seppo::provider::get_provider()` with a `Config`.
 ///
+/// # Errors
+///
+/// Returns an error if cluster creation fails or Gateway API CRDs cannot be installed.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -54,6 +58,10 @@ pub async fn create(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Delete a kind cluster
 ///
+/// # Errors
+///
+/// Returns an error if cluster deletion fails.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -72,6 +80,10 @@ pub async fn delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Check if a kind cluster exists
+///
+/// # Errors
+///
+/// Returns an error if the cluster state cannot be determined.
 pub async fn exists(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let provider = KindProvider::new();
     Ok(provider.exists(name).await?)
@@ -80,6 +92,7 @@ pub async fn exists(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
 /// Install Gateway API CRDs into the cluster
 ///
 /// This is optional but useful for testing Gateway API controllers.
+#[allow(clippy::unused_async)] // Part of async interface, may use await in future
 async fn install_gateway_api_crds() -> Result<(), Box<dyn std::error::Error>> {
     info!("Installing Gateway API CRDs");
 
@@ -103,6 +116,10 @@ async fn install_gateway_api_crds() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Load a Docker image into the kind cluster
+///
+/// # Errors
+///
+/// Returns an error if the image cannot be loaded into the cluster.
 ///
 /// # Examples
 ///

@@ -90,14 +90,18 @@ impl PodAssertion {
     }
 
     /// Assert the pod is in Running phase
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the pod doesn't exist,
+    /// or `AssertionError::Failed` if the pod is not Running.
     pub async fn is_running(&self) -> Result<(), AssertionError> {
         let pod = self.get_pod().await?;
         let phase = pod
             .status
             .as_ref()
             .and_then(|s| s.phase.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
+            .map_or("Unknown", std::string::String::as_str);
 
         if phase == "Running" {
             Ok(())
@@ -109,14 +113,18 @@ impl PodAssertion {
     }
 
     /// Assert the pod is in Pending phase
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the pod doesn't exist,
+    /// or `AssertionError::Failed` if the pod is not Pending.
     pub async fn is_pending(&self) -> Result<(), AssertionError> {
         let pod = self.get_pod().await?;
         let phase = pod
             .status
             .as_ref()
             .and_then(|s| s.phase.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
+            .map_or("Unknown", std::string::String::as_str);
 
         if phase == "Pending" {
             Ok(())
@@ -128,6 +136,11 @@ impl PodAssertion {
     }
 
     /// Assert the pod has a specific label
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the pod doesn't exist,
+    /// or `AssertionError::Failed` if the label is missing or has wrong value.
     pub async fn has_label(&self, key: &str, value: &str) -> Result<(), AssertionError> {
         let pod = self.get_pod().await?;
         let labels = pod.metadata.labels.as_ref();
@@ -150,6 +163,11 @@ impl PodAssertion {
     }
 
     /// Assert the pod has a specific annotation
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the pod doesn't exist,
+    /// or `AssertionError::Failed` if the annotation is missing or has wrong value.
     pub async fn has_annotation(&self, key: &str, value: &str) -> Result<(), AssertionError> {
         let pod = self.get_pod().await?;
         let annotations = pod.metadata.annotations.as_ref();
@@ -172,6 +190,11 @@ impl PodAssertion {
     }
 
     /// Assert all containers in the pod are ready
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the pod doesn't exist,
+    /// or `AssertionError::Failed` if any container is not ready.
     pub async fn containers_ready(&self) -> Result<(), AssertionError> {
         let pod = self.get_pod().await?;
         let container_statuses = pod
@@ -220,6 +243,11 @@ impl DeploymentAssertion {
     }
 
     /// Assert the deployment has the expected number of replicas
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the deployment doesn't exist,
+    /// or `AssertionError::Failed` if ready replicas don't match expected.
     pub async fn has_replicas(&self, expected: i32) -> Result<(), AssertionError> {
         let deployment = self.get_deployment().await?;
         let actual = deployment
@@ -241,6 +269,11 @@ impl DeploymentAssertion {
     }
 
     /// Assert the deployment is available (has minimum availability)
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the deployment doesn't exist,
+    /// or `AssertionError::Failed` if the deployment is not available.
     pub async fn is_available(&self) -> Result<(), AssertionError> {
         let deployment = self.get_deployment().await?;
         let conditions = deployment
@@ -253,8 +286,7 @@ impl DeploymentAssertion {
                 let available = conds
                     .iter()
                     .find(|c| c.type_ == "Available")
-                    .map(|c| c.status == "True")
-                    .unwrap_or(false);
+                    .is_some_and(|c| c.status == "True");
 
                 if available {
                     Ok(())
@@ -271,6 +303,11 @@ impl DeploymentAssertion {
     }
 
     /// Assert the deployment has a specific label
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the deployment doesn't exist,
+    /// or `AssertionError::Failed` if the label is missing or has wrong value.
     pub async fn has_label(&self, key: &str, value: &str) -> Result<(), AssertionError> {
         let deployment = self.get_deployment().await?;
         let labels = deployment.metadata.labels.as_ref();
@@ -313,6 +350,11 @@ impl ServiceAssertion {
     }
 
     /// Assert the service exposes a specific port
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the service doesn't exist,
+    /// or `AssertionError::Failed` if the port is not exposed.
     pub async fn has_port(&self, port: i32) -> Result<(), AssertionError> {
         let service = self.get_service().await?;
         let ports = service.spec.as_ref().and_then(|s| s.ports.as_ref());
@@ -338,15 +380,19 @@ impl ServiceAssertion {
         }
     }
 
-    /// Assert the service is of type ClusterIP
+    /// Assert the service is of type `ClusterIP`
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the service doesn't exist,
+    /// or `AssertionError::Failed` if the service type is not `ClusterIP`.
     pub async fn is_cluster_ip(&self) -> Result<(), AssertionError> {
         let service = self.get_service().await?;
         let svc_type = service
             .spec
             .as_ref()
             .and_then(|s| s.type_.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("ClusterIP"); // default is ClusterIP
+            .map_or("ClusterIP", std::string::String::as_str); // default is ClusterIP
 
         if svc_type == "ClusterIP" {
             Ok(())
@@ -360,15 +406,19 @@ impl ServiceAssertion {
         }
     }
 
-    /// Assert the service is of type LoadBalancer
+    /// Assert the service is of type `LoadBalancer`
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the service doesn't exist,
+    /// or `AssertionError::Failed` if the service type is not `LoadBalancer`.
     pub async fn is_load_balancer(&self) -> Result<(), AssertionError> {
         let service = self.get_service().await?;
         let svc_type = service
             .spec
             .as_ref()
             .and_then(|s| s.type_.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("ClusterIP");
+            .map_or("ClusterIP", std::string::String::as_str);
 
         if svc_type == "LoadBalancer" {
             Ok(())
@@ -382,15 +432,19 @@ impl ServiceAssertion {
         }
     }
 
-    /// Assert the service is of type NodePort
+    /// Assert the service is of type `NodePort`
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the service doesn't exist,
+    /// or `AssertionError::Failed` if the service type is not `NodePort`.
     pub async fn is_node_port(&self) -> Result<(), AssertionError> {
         let service = self.get_service().await?;
         let svc_type = service
             .spec
             .as_ref()
             .and_then(|s| s.type_.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("ClusterIP");
+            .map_or("ClusterIP", std::string::String::as_str);
 
         if svc_type == "NodePort" {
             Ok(())
@@ -405,6 +459,11 @@ impl ServiceAssertion {
     }
 
     /// Assert the service has a specific selector
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the service doesn't exist,
+    /// or `AssertionError::Failed` if the selector is missing or has wrong value.
     pub async fn has_selector(&self, key: &str, value: &str) -> Result<(), AssertionError> {
         let service = self.get_service().await?;
         let selector = service.spec.as_ref().and_then(|s| s.selector.as_ref());
@@ -448,14 +507,18 @@ impl PvcAssertion {
     }
 
     /// Assert the PVC is bound
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the PVC doesn't exist,
+    /// or `AssertionError::Failed` if the PVC is not Bound.
     pub async fn is_bound(&self) -> Result<(), AssertionError> {
         let pvc = self.get_pvc().await?;
         let phase = pvc
             .status
             .as_ref()
             .and_then(|s| s.phase.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
+            .map_or("Unknown", std::string::String::as_str);
 
         if phase == "Bound" {
             Ok(())
@@ -467,13 +530,18 @@ impl PvcAssertion {
     }
 
     /// Assert the PVC has a specific storage class
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the PVC doesn't exist,
+    /// or `AssertionError::Failed` if the storage class doesn't match.
     pub async fn has_storage_class(&self, storage_class: &str) -> Result<(), AssertionError> {
         let pvc = self.get_pvc().await?;
         let sc = pvc
             .spec
             .as_ref()
             .and_then(|s| s.storage_class_name.as_ref())
-            .map(|s| s.as_str());
+            .map(std::string::String::as_str);
 
         match sc {
             Some(sc) if sc == storage_class => Ok(()),
@@ -490,6 +558,11 @@ impl PvcAssertion {
     }
 
     /// Assert the PVC has a specific capacity
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the PVC doesn't exist,
+    /// or `AssertionError::Failed` if the capacity doesn't match.
     pub async fn has_capacity(&self, capacity: &str) -> Result<(), AssertionError> {
         let pvc = self.get_pvc().await?;
         let actual_capacity = pvc
@@ -514,6 +587,10 @@ impl PvcAssertion {
     }
 
     /// Assert the PVC exists (convenience method)
+    ///
+    /// # Errors
+    ///
+    /// Returns `AssertionError::NotFound` if the PVC doesn't exist.
     pub async fn exists(&self) -> Result<(), AssertionError> {
         self.get_pvc().await?;
         Ok(())

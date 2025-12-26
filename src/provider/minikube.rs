@@ -13,6 +13,7 @@ use crate::config::ClusterConfig;
 pub struct MinikubeProvider;
 
 impl MinikubeProvider {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -46,7 +47,7 @@ impl ClusterProvider for MinikubeProvider {
 
         // Add K8s version if specified
         if let Some(ref version) = config.k8s_version {
-            cmd.args(["--kubernetes-version", &format!("v{}", version)]);
+            cmd.args(["--kubernetes-version", &format!("v{version}")]);
         }
 
         // Add nodes (workers + 1 control plane)
@@ -114,7 +115,7 @@ impl ClusterProvider for MinikubeProvider {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Simple check - if profile name appears in output
-        Ok(stdout.contains(&format!("\"{}\"", name)))
+        Ok(stdout.contains(&format!("\"{name}\"")))
     }
 
     async fn kubeconfig(&self, _name: &str) -> Result<String, ProviderError> {
@@ -122,7 +123,7 @@ impl ClusterProvider for MinikubeProvider {
         let home = std::env::var("HOME")
             .map_err(|_| ProviderError::CommandFailed("HOME not set".to_string()))?;
 
-        Ok(format!("{}/.kube/config", home))
+        Ok(format!("{home}/.kube/config"))
     }
 
     fn name(&self) -> &'static str {

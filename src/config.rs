@@ -87,30 +87,35 @@ impl ClusterConfig {
     }
 
     /// Set number of worker nodes
+    #[must_use]
     pub fn workers(mut self, workers: u32) -> Self {
         self.workers = workers;
         self
     }
 
     /// Set Kubernetes version
+    #[must_use]
     pub fn k8s_version(mut self, version: impl Into<String>) -> Self {
         self.k8s_version = Some(version.into());
         self
     }
 
     /// Set Minikube driver
+    #[must_use]
     pub fn driver(mut self, driver: impl Into<String>) -> Self {
         self.driver = Some(driver.into());
         self
     }
 
     /// Set kubeconfig path (for existing clusters)
+    #[must_use]
     pub fn kubeconfig(mut self, path: impl Into<String>) -> Self {
         self.kubeconfig = Some(path.into());
         self
     }
 
     /// Set kubectl context (for existing clusters)
+    #[must_use]
     pub fn context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(context.into());
         self
@@ -147,47 +152,55 @@ pub struct EnvironmentConfig {
 
 impl EnvironmentConfig {
     /// Create new empty environment config
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Add a Docker image to load
+    #[must_use]
     pub fn image(mut self, image: impl Into<String>) -> Self {
         self.images.push(image.into());
         self
     }
 
     /// Add multiple Docker images
+    #[must_use]
     pub fn images(mut self, images: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.images.extend(images.into_iter().map(Into::into));
         self
     }
 
     /// Add a manifest to apply
+    #[must_use]
     pub fn manifest(mut self, path: impl Into<String>) -> Self {
         self.manifests.push(path.into());
         self
     }
 
     /// Add multiple manifests
+    #[must_use]
     pub fn manifests(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.manifests.extend(paths.into_iter().map(Into::into));
         self
     }
 
     /// Add a wait condition
+    #[must_use]
     pub fn wait(mut self, condition: WaitCondition) -> Self {
         self.wait.push(condition);
         self
     }
 
     /// Set setup script path
+    #[must_use]
     pub fn setup_script(mut self, path: impl Into<String>) -> Self {
         self.setup_script = Some(path.into());
         self
     }
 
     /// Add an environment variable
+    #[must_use]
     pub fn env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.insert(key.into(), value.into());
         self
@@ -254,36 +267,42 @@ impl WaitCondition {
     }
 
     /// Set namespace
+    #[must_use]
     pub fn namespace(mut self, ns: impl Into<String>) -> Self {
         self.namespace = ns.into();
         self
     }
 
     /// Set timeout
+    #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Set timeout in seconds
+    #[must_use]
     pub fn timeout_secs(mut self, secs: u64) -> Self {
         self.timeout = Duration::from_secs(secs);
         self
     }
 
     /// Set replicas to wait for
+    #[must_use]
     pub fn replicas(mut self, count: u32) -> Self {
         self.replicas = Some(count);
         self
     }
 
     /// Set label selector
+    #[must_use]
     pub fn selector(mut self, selector: impl Into<String>) -> Self {
         self.selector = Some(selector.into());
         self
     }
 
     /// Get timeout as string for kubectl (e.g., "60s")
+    #[must_use]
     pub fn timeout_str(&self) -> String {
         format!("{}s", self.timeout.as_secs())
     }
@@ -301,6 +320,7 @@ pub struct Config {
 
 impl Config {
     /// Create config with cluster and default environment
+    #[must_use]
     pub fn new(cluster: ClusterConfig) -> Self {
         Self {
             cluster,
@@ -309,6 +329,7 @@ impl Config {
     }
 
     /// Set environment configuration
+    #[must_use]
     pub fn environment(mut self, env: EnvironmentConfig) -> Self {
         self.environment = env;
         self

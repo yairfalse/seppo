@@ -104,18 +104,25 @@ where
     Fut: Future<Output = bool>,
 {
     /// Set the timeout duration
+    #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Set the polling interval
+    #[must_use]
     pub fn interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
 
     /// Run the check, retrying until success or timeout
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConditionError::EventuallyFailed` if the condition never becomes true
+    /// within the timeout period.
     pub async fn await_condition(self) -> Result<(), ConditionError> {
         let start = Instant::now();
         let mut attempts = 0u32;
@@ -147,18 +154,25 @@ where
     Fut: Future<Output = bool>,
 {
     /// Set the duration to check for
+    #[must_use]
     pub fn duration(mut self, duration: Duration) -> Self {
         self.duration = duration;
         self
     }
 
     /// Set the polling interval
+    #[must_use]
     pub fn interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
 
     /// Run the check, verifying condition stays true
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConditionError::ConsistentlyFailed` if the condition becomes false
+    /// before the duration elapses.
     pub async fn await_condition(self) -> Result<(), ConditionError> {
         let start = Instant::now();
 

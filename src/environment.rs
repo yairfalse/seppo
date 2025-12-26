@@ -60,6 +60,14 @@ pub enum EnvironmentError {
 /// 3. Apply K8s manifests
 /// 4. Wait for readiness conditions
 /// 5. Run setup script (if configured)
+///
+/// # Errors
+///
+/// Returns `EnvironmentError` if any setup step fails:
+/// - Provider errors during cluster creation
+/// - Failed to load images or apply manifests
+/// - Wait conditions timeout
+/// - Setup script failures
 #[instrument(skip(config), fields(cluster_name = %config.cluster.name))]
 pub async fn setup(config: &Config) -> Result<SetupResult, EnvironmentError> {
     let mut result = SetupResult::default();
@@ -99,6 +107,7 @@ pub async fn setup(config: &Config) -> Result<SetupResult, EnvironmentError> {
 }
 
 /// Apply a K8s manifest using kubectl
+#[allow(clippy::unused_async)] // Part of async interface, may use await in future
 async fn apply_manifest(path: &str) -> Result<(), EnvironmentError> {
     // Check if manifest exists
     if !Path::new(path).exists() {
@@ -123,6 +132,7 @@ async fn apply_manifest(path: &str) -> Result<(), EnvironmentError> {
 }
 
 /// Wait for a K8s resource condition using kubectl wait
+#[allow(clippy::unused_async)] // Part of async interface, may use await in future
 async fn wait_for_condition(wait: &WaitCondition) -> Result<(), EnvironmentError> {
     let timeout_str = wait.timeout_str();
     info!(
@@ -135,7 +145,7 @@ async fn wait_for_condition(wait: &WaitCondition) -> Result<(), EnvironmentError
         "wait",
         &format!("--for=condition={}", wait.condition),
         &wait.resource,
-        &format!("--timeout={}", timeout_str),
+        &format!("--timeout={timeout_str}"),
     ]);
 
     // Add namespace
@@ -161,6 +171,7 @@ async fn wait_for_condition(wait: &WaitCondition) -> Result<(), EnvironmentError
 }
 
 /// Run setup script
+#[allow(clippy::unused_async)] // Part of async interface, may use await in future
 async fn run_setup_script(path: &str) -> Result<(), EnvironmentError> {
     // Check if script exists
     if !Path::new(path).exists() {

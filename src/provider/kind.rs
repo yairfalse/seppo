@@ -13,6 +13,7 @@ use crate::config::ClusterConfig;
 pub struct KindProvider;
 
 impl KindProvider {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -44,11 +45,10 @@ impl ClusterProvider for KindProvider {
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
-{}networking:
+{worker_nodes}networking:
   disableDefaultCNI: false
   podSubnet: "10.244.0.0/16"
-"#,
-            worker_nodes
+"#
         );
 
         // Write config to temp file
@@ -69,7 +69,7 @@ nodes:
 
         // Add K8s version if specified
         if let Some(ref version) = config.k8s_version {
-            cmd.args(["--image", &format!("kindest/node:v{}", version)]);
+            cmd.args(["--image", &format!("kindest/node:v{version}")]);
         }
 
         let output = cmd

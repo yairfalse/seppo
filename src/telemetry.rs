@@ -18,7 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 /// Initialize logging with tracing-subscriber
 ///
-/// Uses RUST_LOG env var for filtering (default: info).
+/// Uses `RUST_LOG` env var for filtering (default: info).
 /// Call once at the start of your test or application.
 pub fn init_logging() {
     let _ = tracing_subscriber::registry()

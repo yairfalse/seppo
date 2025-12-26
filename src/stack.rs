@@ -64,22 +64,26 @@ pub struct Stack {
 
 impl Stack {
     /// Create a new empty stack
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Add a service to the stack and return a builder for it
+    #[must_use]
     pub fn service(mut self, name: &str) -> ServiceBuilder {
         self.services.push(ServiceDef::new(name));
         ServiceBuilder { stack: self }
     }
 
     /// Get the service definitions
+    #[must_use]
     pub fn services(&self) -> &[ServiceDef] {
         &self.services
     }
 
     /// Generate Kubernetes Deployment for a service
+    #[must_use]
     pub fn deployment_for(&self, svc: &ServiceDef, namespace: &str) -> Deployment {
         let labels: BTreeMap<String, String> = [("app".to_string(), svc.name.clone())]
             .into_iter()
@@ -128,6 +132,7 @@ impl Stack {
     }
 
     /// Generate Kubernetes Service for a service definition (if it has a port)
+    #[must_use]
     pub fn service_for(&self, svc: &ServiceDef, namespace: &str) -> Option<Service> {
         let port = svc.port?;
 
@@ -169,6 +174,7 @@ impl Stack {
 ///     .port(80)
 ///     .build();
 /// ```
+#[must_use]
 pub fn stack() -> Stack {
     Stack::new()
 }
@@ -181,6 +187,7 @@ pub struct ServiceBuilder {
 
 impl ServiceBuilder {
     /// Set the container image for this service
+    #[must_use]
     pub fn image(mut self, image: &str) -> Self {
         if let Some(svc) = self.stack.services.last_mut() {
             svc.image = image.to_string();
@@ -192,8 +199,9 @@ impl ServiceBuilder {
     ///
     /// # Panics
     /// Panics if count is negative.
+    #[must_use]
     pub fn replicas(mut self, count: i32) -> Self {
-        assert!(count >= 0, "replicas must be non-negative, got {}", count);
+        assert!(count >= 0, "replicas must be non-negative, got {count}");
         if let Some(svc) = self.stack.services.last_mut() {
             svc.replicas = count;
         }
@@ -204,11 +212,11 @@ impl ServiceBuilder {
     ///
     /// # Panics
     /// Panics if port is not in range 1-65535.
+    #[must_use]
     pub fn port(mut self, port: i32) -> Self {
         assert!(
             port > 0 && port <= 65535,
-            "port must be between 1 and 65535, got {}",
-            port
+            "port must be between 1 and 65535, got {port}"
         );
         if let Some(svc) = self.stack.services.last_mut() {
             svc.port = Some(port);
@@ -217,11 +225,13 @@ impl ServiceBuilder {
     }
 
     /// Add another service to the stack
+    #[must_use]
     pub fn service(self, name: &str) -> ServiceBuilder {
         self.stack.service(name)
     }
 
     /// Finish building and return the stack
+    #[must_use]
     pub fn build(self) -> Stack {
         self.stack
     }

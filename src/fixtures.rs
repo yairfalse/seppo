@@ -73,6 +73,7 @@ pub struct ServiceFixture {
 
 impl DeploymentFixture {
     /// Create a new deployment fixture
+    #[must_use]
     pub fn new(name: &str) -> Self {
         let mut labels = BTreeMap::new();
         labels.insert("app".to_string(), name.to_string());
@@ -91,12 +92,14 @@ impl DeploymentFixture {
     }
 
     /// Set the namespace
+    #[must_use]
     pub fn namespace(mut self, namespace: &str) -> Self {
         self.namespace = Some(namespace.to_string());
         self
     }
 
     /// Set the container image
+    #[must_use]
     pub fn image(mut self, image: &str) -> Self {
         self.image = image.to_string();
         self
@@ -106,6 +109,7 @@ impl DeploymentFixture {
     ///
     /// # Panics
     /// Panics if replicas is negative
+    #[must_use]
     pub fn replicas(mut self, replicas: i32) -> Self {
         assert!(replicas >= 0, "replica count cannot be negative");
         self.replicas = replicas;
@@ -116,37 +120,41 @@ impl DeploymentFixture {
     ///
     /// # Panics
     /// Panics if port is not in the valid range (1-65535)
+    #[must_use]
     pub fn port(mut self, port: i32) -> Self {
         assert!(
             (1..=65535).contains(&port),
-            "port must be in range 1-65535, got {}",
-            port
+            "port must be in range 1-65535, got {port}"
         );
         self.ports.push(port);
         self
     }
 
     /// Add an environment variable
+    #[must_use]
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.to_string(), value.to_string()));
         self
     }
 
     /// Add a label
+    #[must_use]
     pub fn label(mut self, key: &str, value: &str) -> Self {
         self.labels.insert(key.to_string(), value.to_string());
         self
     }
 
     /// Set the container command
+    #[must_use]
     pub fn command(mut self, cmd: &[&str]) -> Self {
-        self.command = cmd.iter().map(|s| s.to_string()).collect();
+        self.command = cmd.iter().map(|s| (*s).to_string()).collect();
         self
     }
 
     /// Set the container args
+    #[must_use]
     pub fn args(mut self, args: &[&str]) -> Self {
-        self.args = args.iter().map(|s| s.to_string()).collect();
+        self.args = args.iter().map(|s| (*s).to_string()).collect();
         self
     }
 
@@ -154,6 +162,7 @@ impl DeploymentFixture {
     ///
     /// # Panics
     /// Panics if image is empty
+    #[must_use]
     pub fn build(&self) -> Deployment {
         assert!(!self.image.is_empty(), "image must be set before building");
 
@@ -234,6 +243,7 @@ impl DeploymentFixture {
 
 impl PodFixture {
     /// Create a new pod fixture
+    #[must_use]
     pub fn new(name: &str) -> Self {
         let mut labels = BTreeMap::new();
         labels.insert("app".to_string(), name.to_string());
@@ -250,36 +260,42 @@ impl PodFixture {
     }
 
     /// Set the namespace
+    #[must_use]
     pub fn namespace(mut self, namespace: &str) -> Self {
         self.namespace = Some(namespace.to_string());
         self
     }
 
     /// Set the container image
+    #[must_use]
     pub fn image(mut self, image: &str) -> Self {
         self.image = image.to_string();
         self
     }
 
     /// Set the container command
+    #[must_use]
     pub fn command(mut self, cmd: &[&str]) -> Self {
-        self.command = cmd.iter().map(|s| s.to_string()).collect();
+        self.command = cmd.iter().map(|s| (*s).to_string()).collect();
         self
     }
 
     /// Set the container args
+    #[must_use]
     pub fn args(mut self, args: &[&str]) -> Self {
-        self.args = args.iter().map(|s| s.to_string()).collect();
+        self.args = args.iter().map(|s| (*s).to_string()).collect();
         self
     }
 
     /// Add an environment variable
+    #[must_use]
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.to_string(), value.to_string()));
         self
     }
 
     /// Add a label
+    #[must_use]
     pub fn label(mut self, key: &str, value: &str) -> Self {
         self.labels.insert(key.to_string(), value.to_string());
         self
@@ -289,6 +305,7 @@ impl PodFixture {
     ///
     /// # Panics
     /// Panics if image is empty
+    #[must_use]
     pub fn build(&self) -> Pod {
         assert!(!self.image.is_empty(), "image must be set before building");
 
@@ -342,6 +359,7 @@ impl PodFixture {
 
 impl ServiceFixture {
     /// Create a new service fixture
+    #[must_use]
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -353,12 +371,14 @@ impl ServiceFixture {
     }
 
     /// Set the namespace
+    #[must_use]
     pub fn namespace(mut self, namespace: &str) -> Self {
         self.namespace = Some(namespace.to_string());
         self
     }
 
     /// Add a selector
+    #[must_use]
     pub fn selector(mut self, key: &str, value: &str) -> Self {
         self.selector.insert(key.to_string(), value.to_string());
         self
@@ -367,41 +387,44 @@ impl ServiceFixture {
     /// Add a port mapping (port -> targetPort)
     ///
     /// # Panics
-    /// Panics if port or target_port is not in the valid range (1-65535)
+    /// Panics if port or `target_port` is not in the valid range (1-65535)
+    #[must_use]
     pub fn port(mut self, port: i32, target_port: i32) -> Self {
         assert!(
             (1..=65535).contains(&port),
-            "port must be in range 1-65535, got {}",
-            port
+            "port must be in range 1-65535, got {port}"
         );
         assert!(
             (1..=65535).contains(&target_port),
-            "target_port must be in range 1-65535, got {}",
-            target_port
+            "target_port must be in range 1-65535, got {target_port}"
         );
         self.ports.push((port, target_port));
         self
     }
 
-    /// Set service type to ClusterIP
+    /// Set service type to `ClusterIP`
+    #[must_use]
     pub fn cluster_ip(mut self) -> Self {
         self.service_type = Some("ClusterIP".to_string());
         self
     }
 
-    /// Set service type to NodePort
+    /// Set service type to `NodePort`
+    #[must_use]
     pub fn node_port(mut self) -> Self {
         self.service_type = Some("NodePort".to_string());
         self
     }
 
-    /// Set service type to LoadBalancer
+    /// Set service type to `LoadBalancer`
+    #[must_use]
     pub fn load_balancer(mut self) -> Self {
         self.service_type = Some("LoadBalancer".to_string());
         self
     }
 
     /// Build the Service resource
+    #[must_use]
     pub fn build(&self) -> Service {
         let service_ports: Vec<ServicePort> = self
             .ports
@@ -458,6 +481,7 @@ impl ServiceFixture {
 ///     .replicas(3)
 ///     .build();
 /// ```
+#[must_use]
 pub fn deployment(name: &str) -> DeploymentFixture {
     DeploymentFixture::new(name)
 }
@@ -476,6 +500,7 @@ pub fn deployment(name: &str) -> DeploymentFixture {
 ///     .command(&["sleep", "infinity"])
 ///     .build();
 /// ```
+#[must_use]
 pub fn pod(name: &str) -> PodFixture {
     PodFixture::new(name)
 }
@@ -494,6 +519,7 @@ pub fn pod(name: &str) -> PodFixture {
 ///     .port(80, 8080)
 ///     .build();
 /// ```
+#[must_use]
 pub fn service(name: &str) -> ServiceFixture {
     ServiceFixture::new(name)
 }
@@ -722,7 +748,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "replica count cannot be negative")]
     fn test_deployment_negative_replicas_panics() {
-        DeploymentFixture::new("my-app")
+        let _ = DeploymentFixture::new("my-app")
             .image("nginx:latest")
             .replicas(-1);
     }
@@ -730,7 +756,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "port must be in range 1-65535")]
     fn test_deployment_invalid_port_zero_panics() {
-        DeploymentFixture::new("my-app")
+        let _ = DeploymentFixture::new("my-app")
             .image("nginx:latest")
             .port(0);
     }
@@ -738,7 +764,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "port must be in range 1-65535")]
     fn test_deployment_invalid_port_too_high_panics() {
-        DeploymentFixture::new("my-app")
+        let _ = DeploymentFixture::new("my-app")
             .image("nginx:latest")
             .port(65536);
     }
@@ -746,25 +772,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "port must be in range 1-65535")]
     fn test_service_invalid_port_panics() {
-        ServiceFixture::new("my-service").port(0, 8080);
+        let _ = ServiceFixture::new("my-service").port(0, 8080);
     }
 
     #[test]
     #[should_panic(expected = "target_port must be in range 1-65535")]
     fn test_service_invalid_target_port_panics() {
-        ServiceFixture::new("my-service").port(80, 0);
+        let _ = ServiceFixture::new("my-service").port(80, 0);
     }
 
     #[test]
     #[should_panic(expected = "image must be set before building")]
     fn test_deployment_empty_image_panics() {
-        DeploymentFixture::new("my-app").build();
+        let _ = DeploymentFixture::new("my-app").build();
     }
 
     #[test]
     #[should_panic(expected = "image must be set before building")]
     fn test_pod_empty_image_panics() {
-        PodFixture::new("test-pod").build();
+        let _ = PodFixture::new("test-pod").build();
     }
 
     #[test]

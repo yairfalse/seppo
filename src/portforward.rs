@@ -126,6 +126,7 @@ impl PortForward {
     }
 
     /// Get the local address of the port forward
+    #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -145,13 +146,14 @@ impl PortForward {
     /// let api_url = pf.url("api/users");
     /// // Returns "http://127.0.0.1:54321/api/users"
     /// ```
+    #[must_use]
     pub fn url(&self, path: &str) -> String {
         let normalized_path = if path.is_empty() {
             "/".to_string()
         } else if path.starts_with('/') {
             path.to_string()
         } else {
-            format!("/{}", path)
+            format!("/{path}")
         };
         format!("http://{}{}", self.local_addr, normalized_path)
     }
@@ -161,11 +163,19 @@ impl PortForward {
     /// Returns the response body as a UTF-8 string. Binary responses
     /// are not supported - use `local_addr()` with your own HTTP client
     /// for binary data.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortForwardError` if the connection or request fails.
     pub async fn get(&self, path: &str) -> Result<String, PortForwardError> {
         self.request("GET", path, None).await
     }
 
     /// Make an HTTP POST request through the port forward
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortForwardError` if the connection or request fails.
     ///
     /// # Example
     ///
@@ -183,6 +193,10 @@ impl PortForward {
 
     /// Make an HTTP PUT request through the port forward
     ///
+    /// # Errors
+    ///
+    /// Returns `PortForwardError` if the connection or request fails.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -198,6 +212,10 @@ impl PortForward {
     }
 
     /// Make an HTTP DELETE request through the port forward
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortForwardError` if the connection or request fails.
     ///
     /// # Example
     ///

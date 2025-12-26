@@ -15,6 +15,7 @@ pub struct ExistingProvider {
 }
 
 impl ExistingProvider {
+    #[must_use]
     pub fn new(kubeconfig: Option<String>, context: Option<String>) -> Self {
         Self {
             kubeconfig,
@@ -86,13 +87,12 @@ impl ClusterProvider for ExistingProvider {
     }
 
     async fn kubeconfig(&self, _name: &str) -> Result<String, ProviderError> {
-        match &self.kubeconfig {
-            Some(path) => Ok(path.clone()),
-            None => {
-                let home = std::env::var("HOME")
-                    .map_err(|_| ProviderError::CommandFailed("HOME not set".to_string()))?;
-                Ok(format!("{}/.kube/config", home))
-            }
+        if let Some(path) = &self.kubeconfig {
+            Ok(path.clone())
+        } else {
+            let home = std::env::var("HOME")
+                .map_err(|_| ProviderError::CommandFailed("HOME not set".to_string()))?;
+            Ok(format!("{home}/.kube/config"))
         }
     }
 

@@ -22,6 +22,7 @@ pub struct RunResult {
 
 impl RunResult {
     /// Returns true if the command succeeded (exit code 0)
+    #[must_use]
     pub fn passed(&self) -> bool {
         self.exit_code == 0
     }
@@ -45,6 +46,11 @@ pub enum RunnerError {
 ///
 /// # Returns
 /// * `RunResult` with exit code, stdout, and stderr
+///
+/// # Errors
+///
+/// Returns `RunnerError::CommandNotFound` if the program doesn't exist,
+/// or `RunnerError::ExecutionFailed` if execution fails.
 #[instrument(fields(program = %program))]
 pub async fn run(program: &str, args: &[&str]) -> Result<RunResult, RunnerError> {
     run_with_env(program, args, &HashMap::new()).await
@@ -59,7 +65,13 @@ pub async fn run(program: &str, args: &[&str]) -> Result<RunResult, RunnerError>
 ///
 /// # Returns
 /// * `RunResult` with exit code, stdout, and stderr
+///
+/// # Errors
+///
+/// Returns `RunnerError::CommandNotFound` if the program doesn't exist,
+/// or `RunnerError::ExecutionFailed` if execution fails.
 #[instrument(skip(env), fields(program = %program))]
+#[allow(clippy::implicit_hasher)] // Simplicity over generalization for this helper
 pub async fn run_with_env(
     program: &str,
     args: &[&str],
