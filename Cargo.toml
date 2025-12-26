@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Yair <yair@example.com>"]
 license = "Apache-2.0"
 description = "Kubernetes testing framework with multi-cloud cluster management"
-repository = "https://github.com/you/seppo"
+repository = "https://github.com/yairfalse/seppo"
 keywords = ["kubernetes", "testing", "kind", "eks", "integration-tests"]
 categories = ["development-tools::testing"]
 
