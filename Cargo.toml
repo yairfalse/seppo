@@ -41,7 +41,7 @@ chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Macros
-seppo-macros = { path = "seppo-macros" }
+seppo-macros = { version = "0.1.0", path = "seppo-macros" }
 
 # Logging
 tracing = "0.1"
