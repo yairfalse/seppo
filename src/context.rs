@@ -6669,4 +6669,250 @@ mod tests {
         // 99th percentile of 1-100ms should be around 99ms
         assert!(stats.p99_latency() >= std::time::Duration::from_millis(99));
     }
+
+    // ============================================================
+    // label_suffix tests
+    // ============================================================
+
+    #[test]
+    fn test_label_suffix_deterministic() {
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), "frontend".to_string());
+        labels.insert("env".to_string(), "prod".to_string());
+
+        let suffix1 = label_suffix(&labels);
+        let suffix2 = label_suffix(&labels);
+        assert_eq!(suffix1, suffix2, "Same labels should produce same suffix");
+        assert_eq!(suffix1.len(), 8, "Suffix should be 8 hex characters");
+    }
+
+    #[test]
+    fn test_label_suffix_empty_map() {
+        let labels = HashMap::new();
+        let suffix = label_suffix(&labels);
+        assert_eq!(suffix.len(), 8, "Empty map should still produce 8-char suffix");
+    }
+
+    #[test]
+    fn test_label_suffix_key_order_independent() {
+        let mut labels_a = HashMap::new();
+        labels_a.insert("app".to_string(), "web".to_string());
+        labels_a.insert("tier".to_string(), "frontend".to_string());
+
+        let mut labels_b = HashMap::new();
+        labels_b.insert("tier".to_string(), "frontend".to_string());
+        labels_b.insert("app".to_string(), "web".to_string());
+
+        assert_eq!(
+            label_suffix(&labels_a),
+            label_suffix(&labels_b),
+            "Insertion order should not affect suffix"
+        );
+    }
+
+    #[test]
+    fn test_label_suffix_different_labels_differ() {
+        let mut labels_a = HashMap::new();
+        labels_a.insert("app".to_string(), "frontend".to_string());
+
+        let mut labels_b = HashMap::new();
+        labels_b.insert("app".to_string(), "backend".to_string());
+
+        assert_ne!(
+            label_suffix(&labels_a),
+            label_suffix(&labels_b),
+            "Different labels should produce different suffixes"
+        );
+    }
+
+    // ============================================================
+    // api_group_for_resource tests
+    // ============================================================
+
+    #[test]
+    fn test_api_group_core_resources() {
+        assert_eq!(api_group_for_resource("pods"), "");
+        assert_eq!(api_group_for_resource("services"), "");
+        assert_eq!(api_group_for_resource("configmaps"), "");
+        assert_eq!(api_group_for_resource("secrets"), "");
+        assert_eq!(api_group_for_resource("namespaces"), "");
+        assert_eq!(api_group_for_resource("serviceaccounts"), "");
+    }
+
+    #[test]
+    fn test_api_group_apps_resources() {
+        assert_eq!(api_group_for_resource("deployments"), "apps");
+        assert_eq!(api_group_for_resource("statefulsets"), "apps");
+        assert_eq!(api_group_for_resource("daemonsets"), "apps");
+        assert_eq!(api_group_for_resource("replicasets"), "apps");
+    }
+
+    #[test]
+    fn test_api_group_networking_resources() {
+        assert_eq!(api_group_for_resource("ingresses"), "networking.k8s.io");
+        assert_eq!(api_group_for_resource("networkpolicies"), "networking.k8s.io");
+    }
+
+    #[test]
+    fn test_api_group_batch_resources() {
+        assert_eq!(api_group_for_resource("jobs"), "batch");
+        assert_eq!(api_group_for_resource("cronjobs"), "batch");
+    }
+
+    #[test]
+    fn test_api_group_rbac_resources() {
+        assert_eq!(
+            api_group_for_resource("roles"),
+            "rbac.authorization.k8s.io"
+        );
+        assert_eq!(
+            api_group_for_resource("clusterroles"),
+            "rbac.authorization.k8s.io"
+        );
+    }
+
+    #[test]
+    fn test_api_group_unknown_defaults_to_core() {
+        assert_eq!(api_group_for_resource("unknown-resource"), "");
+        assert_eq!(api_group_for_resource("widgets"), "");
+    }
+
+    // ============================================================
+    // lookup_env_vars tests
+    // ============================================================
+
+    #[test]
+    fn test_lookup_env_vars_all_found() {
+        std::env::set_var("SEPPO_TEST_VAR_A", "alpha");
+        std::env::set_var("SEPPO_TEST_VAR_B", "beta");
+
+        let result = lookup_env_vars(&["SEPPO_TEST_VAR_A", "SEPPO_TEST_VAR_B"]);
+        assert!(result.is_ok());
+        let map = result.unwrap();
+        assert_eq!(map.get("SEPPO_TEST_VAR_A"), Some(&"alpha".to_string()));
+        assert_eq!(map.get("SEPPO_TEST_VAR_B"), Some(&"beta".to_string()));
+
+        std::env::remove_var("SEPPO_TEST_VAR_A");
+        std::env::remove_var("SEPPO_TEST_VAR_B");
+    }
+
+    #[test]
+    fn test_lookup_env_vars_one_missing() {
+        std::env::set_var("SEPPO_TEST_EXISTS", "yes");
+        std::env::remove_var("SEPPO_TEST_MISSING");
+
+        let result = lookup_env_vars(&["SEPPO_TEST_EXISTS", "SEPPO_TEST_MISSING"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SEPPO_TEST_MISSING"));
+
+        std::env::remove_var("SEPPO_TEST_EXISTS");
+    }
+
+    #[test]
+    fn test_lookup_env_vars_empty_list() {
+        let result = lookup_env_vars(&[]);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // ============================================================
+    // RBACBuilder tests
+    // ============================================================
+
+    #[test]
+    fn test_rbac_builder_basic() {
+        let rbac = RBACBuilder::service_account("my-sa")
+            .can_get(&["pods", "services"])
+            .can_list(&["deployments"])
+            .build();
+
+        // Verify ServiceAccount name
+        assert_eq!(
+            rbac.service_account.metadata.name,
+            Some("my-sa".to_string())
+        );
+
+        // Verify Role name (default: {sa-name}-role)
+        assert_eq!(rbac.role.metadata.name, Some("my-sa-role".to_string()));
+
+        // Verify RoleBinding
+        assert_eq!(
+            rbac.role_binding.metadata.name,
+            Some("my-sa-binding".to_string())
+        );
+        assert_eq!(rbac.role_binding.role_ref.name, "my-sa-role");
+        assert_eq!(rbac.role_binding.role_ref.kind, "Role");
+        assert_eq!(
+            rbac.role_binding.role_ref.api_group,
+            "rbac.authorization.k8s.io"
+        );
+
+        // Verify subject references the SA
+        let subjects = rbac.role_binding.subjects.unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].name, "my-sa");
+        assert_eq!(subjects[0].kind, "ServiceAccount");
+    }
+
+    #[test]
+    fn test_rbac_builder_custom_role_name() {
+        let rbac = RBACBuilder::service_account("my-sa")
+            .with_role("custom-role")
+            .can_get(&["pods"])
+            .build();
+
+        assert_eq!(rbac.role.metadata.name, Some("custom-role".to_string()));
+        assert_eq!(rbac.role_binding.role_ref.name, "custom-role");
+    }
+
+    #[test]
+    fn test_rbac_builder_rules_have_correct_api_groups() {
+        let rbac = RBACBuilder::service_account("test-sa")
+            .can_get(&["pods", "deployments"])
+            .build();
+
+        let rules = rbac.role.rules.unwrap();
+        // pods → core (""), deployments → "apps" — should create separate rules per group
+        assert!(
+            rules.len() >= 2,
+            "Should have separate rules for different API groups, got {}",
+            rules.len()
+        );
+
+        let core_rule = rules.iter().find(|r| {
+            r.api_groups.as_ref().map_or(false, |g| g.contains(&String::new()))
+        });
+        let apps_rule = rules.iter().find(|r| {
+            r.api_groups
+                .as_ref()
+                .map_or(false, |g| g.contains(&"apps".to_string()))
+        });
+
+        assert!(core_rule.is_some(), "Should have a core API group rule");
+        assert!(apps_rule.is_some(), "Should have an apps API group rule");
+
+        let core_resources = core_rule.unwrap().resources.as_ref().unwrap();
+        assert!(core_resources.contains(&"pods".to_string()));
+
+        let apps_resources = apps_rule.unwrap().resources.as_ref().unwrap();
+        assert!(apps_resources.contains(&"deployments".to_string()));
+    }
+
+    #[test]
+    fn test_rbac_builder_can_all() {
+        let rbac = RBACBuilder::service_account("admin-sa")
+            .can_all(&["secrets"])
+            .build();
+
+        let rules = rbac.role.rules.unwrap();
+        assert_eq!(rules.len(), 1);
+
+        let verbs = &rules[0].verbs;
+        assert!(verbs.contains(&"get".to_string()));
+        assert!(verbs.contains(&"list".to_string()));
+        assert!(verbs.contains(&"watch".to_string()));
+        assert!(verbs.contains(&"create".to_string()));
+        assert!(verbs.contains(&"update".to_string()));
+        assert!(verbs.contains(&"delete".to_string()));
+    }
 }
