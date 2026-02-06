@@ -3712,7 +3712,7 @@ impl IngressTest {
     }
 
     /// Assert the ingress routes to the expected backend
-    pub async fn expect_backend(mut self, backend: &str, port: i32) -> Self {
+    pub async fn expect_backend(mut self, backend: &str, port: u16) -> Self {
         if self.err.is_some() {
             return self;
         }
@@ -3770,7 +3770,7 @@ impl IngressTest {
                                     let actual_port =
                                         service.port.and_then(|p| p.number).unwrap_or(0);
 
-                                    if actual_svc == expected_svc && actual_port == port {
+                                    if actual_svc == expected_svc && actual_port == i32::from(port) {
                                         found = true;
                                         break;
                                     }

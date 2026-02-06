@@ -25,7 +25,7 @@ pub struct ServiceDef {
     pub name: String,
     pub image: String,
     pub replicas: i32,
-    pub port: Option<i32>,
+    pub port: Option<u16>,
 }
 
 impl ServiceDef {
@@ -97,7 +97,7 @@ impl Stack {
 
         if let Some(port) = svc.port {
             container.ports = Some(vec![ContainerPort {
-                container_port: port,
+                container_port: i32::from(port),
                 ..Default::default()
             }]);
         }
@@ -149,7 +149,7 @@ impl Stack {
             spec: Some(ServiceSpec {
                 selector: Some(selector),
                 ports: Some(vec![ServicePort {
-                    port,
+                    port: i32::from(port),
                     ..Default::default()
                 }]),
                 ..Default::default()
@@ -211,13 +211,10 @@ impl ServiceBuilder {
     /// Set the port for this service
     ///
     /// # Panics
-    /// Panics if port is not in range 1-65535.
+    /// Panics if port is zero.
     #[must_use]
-    pub fn port(mut self, port: i32) -> Self {
-        assert!(
-            port > 0 && port <= 65535,
-            "port must be between 1 and 65535, got {port}"
-        );
+    pub fn port(mut self, port: u16) -> Self {
+        assert!(port > 0, "port must be between 1 and 65535, got {port}");
         if let Some(svc) = self.stack.services.last_mut() {
             svc.port = Some(port);
         }
