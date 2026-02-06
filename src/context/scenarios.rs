@@ -152,12 +152,21 @@ impl Context {
                 .build()
                 .unwrap();
 
-            let interval = std::time::Duration::from_secs_f64(1.0 / f64::from(rps));
+            let interval = if rps > 0 {
+                std::time::Duration::from_secs_f64(1.0 / f64::from(rps))
+            } else {
+                std::time::Duration::from_secs(1)
+            };
             let deadline = std::time::Instant::now() + duration;
+            let normalized_endpoint = if endpoint.starts_with('/') {
+                endpoint.clone()
+            } else {
+                format!("/{endpoint}")
+            };
 
             while std::time::Instant::now() < deadline && !stop_flag_clone.load(Ordering::Relaxed) {
                 let start = std::time::Instant::now();
-                let url = format!("http://127.0.0.1:{local_port}{endpoint}");
+                let url = format!("http://127.0.0.1:{local_port}{normalized_endpoint}");
 
                 let result = client.get(&url).send().await;
                 let latency = start.elapsed();

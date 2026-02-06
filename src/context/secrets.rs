@@ -9,7 +9,7 @@ impl Context {
     /// Create a Secret from file contents
     ///
     /// The files map keys become the secret data keys, values are file paths.
-    /// Files are read synchronously from the local filesystem.
+    /// Files are read asynchronously from the local filesystem.
     ///
     /// # Example
     ///

@@ -68,7 +68,7 @@ fn has_ctx_param(input_fn: &ItemFn) -> bool {
     })
 }
 
-/// Check if a function has a return type (i.e., `-> Result<...>`)
+/// Check if a function has an explicit return type (e.g., `-> Result<...>`)
 fn has_result_return(input_fn: &ItemFn) -> bool {
     matches!(&input_fn.sig.output, ReturnType::Type(..))
 }

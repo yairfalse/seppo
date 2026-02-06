@@ -34,7 +34,7 @@ pub(crate) fn label_suffix(labels: &HashMap<String, String>) -> String {
     }
 
     // Take first 8 hex characters of the hash
-    format!("{:x}", hasher.finish())[..8].to_string()
+    format!("{:016x}", hasher.finish())[..8].to_string()
 }
 
 /// Parse a resource reference like "deployment/myapp" into (kind, name)
