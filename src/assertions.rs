@@ -355,13 +355,13 @@ impl ServiceAssertion {
     ///
     /// Returns `AssertionError::NotFound` if the service doesn't exist,
     /// or `AssertionError::Failed` if the port is not exposed.
-    pub async fn has_port(&self, port: i32) -> Result<(), AssertionError> {
+    pub async fn has_port(&self, port: u16) -> Result<(), AssertionError> {
         let service = self.get_service().await?;
         let ports = service.spec.as_ref().and_then(|s| s.ports.as_ref());
 
         match ports {
             Some(ports) => {
-                let has_port = ports.iter().any(|p| p.port == port);
+                let has_port = ports.iter().any(|p| p.port == i32::from(port));
                 if has_port {
                     Ok(())
                 } else {

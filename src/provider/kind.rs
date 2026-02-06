@@ -38,18 +38,7 @@ impl ClusterProvider for KindProvider {
         info!("Creating Kind cluster: {}", config.name);
 
         // Generate Kind config
-        let worker_nodes: String = (0..config.workers).map(|_| "- role: worker\n").collect();
-
-        let kind_config = format!(
-            r#"kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-{worker_nodes}networking:
-  disableDefaultCNI: false
-  podSubnet: "10.244.0.0/16"
-"#
-        );
+        let kind_config = kind_config_yaml(config.workers);
 
         // Write config to temp file
         let config_path = "/tmp/seppo-kind-config.yaml";
@@ -150,5 +139,69 @@ nodes:
 
     fn name(&self) -> &'static str {
         "kind"
+    }
+}
+
+/// Generate a Kind cluster config YAML for the given number of workers
+fn kind_config_yaml(workers: u32) -> String {
+    let worker_nodes: String = (0..workers).map(|_| "- role: worker\n").collect();
+
+    format!(
+        r#"kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+{worker_nodes}networking:
+  disableDefaultCNI: false
+  podSubnet: "10.244.0.0/16"
+"#
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kind_config_zero_workers() {
+        let yaml = kind_config_yaml(0);
+        assert!(yaml.contains("- role: control-plane"));
+        assert!(!yaml.contains("- role: worker"));
+    }
+
+    #[test]
+    fn test_kind_config_one_worker() {
+        let yaml = kind_config_yaml(1);
+        assert!(yaml.contains("- role: control-plane"));
+        let worker_count = yaml.matches("- role: worker").count();
+        assert_eq!(worker_count, 1);
+    }
+
+    #[test]
+    fn test_kind_config_three_workers() {
+        let yaml = kind_config_yaml(3);
+        assert!(yaml.contains("- role: control-plane"));
+        let worker_count = yaml.matches("- role: worker").count();
+        assert_eq!(worker_count, 3);
+    }
+
+    #[test]
+    fn test_kind_config_contains_required_fields() {
+        let yaml = kind_config_yaml(1);
+        assert!(yaml.contains("kind: Cluster"));
+        assert!(yaml.contains("apiVersion: kind.x-k8s.io/v1alpha4"));
+        assert!(yaml.contains("podSubnet:"));
+    }
+
+    #[test]
+    fn test_kind_provider_name() {
+        let provider = KindProvider::new();
+        assert_eq!(provider.name(), "kind");
+    }
+
+    #[test]
+    fn test_kind_provider_default() {
+        let _provider = KindProvider::default();
+        // Should compile and not panic
     }
 }

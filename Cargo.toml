@@ -2,7 +2,7 @@
 name = "seppo"
 version = "0.1.0"
 edition = "2021"
-authors = ["Yair <yair@example.com>"]
+authors = ["Yair <yair.etziony@false-systems.com>"]
 license = "Apache-2.0"
 description = "Kubernetes testing framework with multi-cloud cluster management"
 repository = "https://github.com/yairfalse/seppo"
@@ -28,7 +28,6 @@ json-patch = "4"
 
 # Error handling
 thiserror = "1.0"
-anyhow = "1.0"
 
 # Serialization (for JSON APIs, not config files)
 serde = { version = "1.0", features = ["derive"] }

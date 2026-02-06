@@ -130,3 +130,26 @@ impl ClusterProvider for MinikubeProvider {
         "minikube"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_minikube_provider_name() {
+        let provider = MinikubeProvider::new();
+        assert_eq!(provider.name(), "minikube");
+    }
+
+    #[test]
+    fn test_minikube_provider_default() {
+        let _provider = MinikubeProvider::default();
+    }
+
+    #[tokio::test]
+    async fn test_minikube_kubeconfig_path() {
+        let provider = MinikubeProvider::new();
+        let path = provider.kubeconfig("test-profile").await.unwrap();
+        assert!(path.ends_with("/.kube/config"));
+    }
+}

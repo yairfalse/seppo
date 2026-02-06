@@ -308,26 +308,46 @@ mod tests {
         assert_eq!(extract_body(response), "first\r\n\r\nsecond");
     }
 
-    #[test]
-    fn test_url_path_normalization() {
-        // Helper to test the path normalization logic
-        fn normalize_path(path: &str) -> String {
-            if path.starts_with('/') {
-                path.to_string()
-            } else {
-                format!("/{}", path)
-            }
+    /// Helper to construct a PortForward for unit testing without a real tunnel
+    fn test_port_forward(addr: SocketAddr) -> PortForward {
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
+        PortForward {
+            local_addr: addr,
+            _shutdown_tx: shutdown_tx,
         }
+    }
 
-        // Path with leading slash stays unchanged
-        assert_eq!(normalize_path("/health"), "/health");
-        assert_eq!(normalize_path("/api/users"), "/api/users");
+    #[test]
+    fn test_url_with_leading_slash() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let pf = test_port_forward(addr);
 
-        // Path without leading slash gets one added
-        assert_eq!(normalize_path("health"), "/health");
-        assert_eq!(normalize_path("api/users"), "/api/users");
+        assert_eq!(pf.url("/health"), "http://127.0.0.1:12345/health");
+        assert_eq!(pf.url("/api/users"), "http://127.0.0.1:12345/api/users");
+    }
 
-        // Empty path gets a slash
-        assert_eq!(normalize_path(""), "/");
+    #[test]
+    fn test_url_without_leading_slash() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let pf = test_port_forward(addr);
+
+        assert_eq!(pf.url("health"), "http://127.0.0.1:12345/health");
+        assert_eq!(pf.url("api/users"), "http://127.0.0.1:12345/api/users");
+    }
+
+    #[test]
+    fn test_url_empty_path() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let pf = test_port_forward(addr);
+
+        assert_eq!(pf.url(""), "http://127.0.0.1:12345/");
+    }
+
+    #[test]
+    fn test_local_addr() {
+        let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        let pf = test_port_forward(addr);
+
+        assert_eq!(pf.local_addr(), addr);
     }
 }

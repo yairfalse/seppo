@@ -42,7 +42,7 @@ pub struct DeploymentFixture {
     namespace: Option<String>,
     image: String,
     replicas: i32,
-    ports: Vec<i32>,
+    ports: Vec<u16>,
     env: Vec<(String, String)>,
     labels: BTreeMap<String, String>,
     command: Vec<String>,
@@ -67,7 +67,7 @@ pub struct ServiceFixture {
     name: String,
     namespace: Option<String>,
     selector: BTreeMap<String, String>,
-    ports: Vec<(i32, i32)>, // (port, targetPort)
+    ports: Vec<(u16, u16)>, // (port, targetPort)
     service_type: Option<String>,
 }
 
@@ -119,13 +119,10 @@ impl DeploymentFixture {
     /// Add a container port
     ///
     /// # Panics
-    /// Panics if port is not in the valid range (1-65535)
+    /// Panics if port is zero
     #[must_use]
-    pub fn port(mut self, port: i32) -> Self {
-        assert!(
-            (1..=65535).contains(&port),
-            "port must be in range 1-65535, got {port}"
-        );
+    pub fn port(mut self, port: u16) -> Self {
+        assert!(port > 0, "port must be in range 1-65535, got {port}");
         self.ports.push(port);
         self
     }
@@ -170,7 +167,7 @@ impl DeploymentFixture {
             .ports
             .iter()
             .map(|p| ContainerPort {
-                container_port: *p,
+                container_port: i32::from(*p),
                 ..Default::default()
             })
             .collect();
@@ -387,15 +384,12 @@ impl ServiceFixture {
     /// Add a port mapping (port -> targetPort)
     ///
     /// # Panics
-    /// Panics if port or `target_port` is not in the valid range (1-65535)
+    /// Panics if port or `target_port` is zero
     #[must_use]
-    pub fn port(mut self, port: i32, target_port: i32) -> Self {
+    pub fn port(mut self, port: u16, target_port: u16) -> Self {
+        assert!(port > 0, "port must be in range 1-65535, got {port}");
         assert!(
-            (1..=65535).contains(&port),
-            "port must be in range 1-65535, got {port}"
-        );
-        assert!(
-            (1..=65535).contains(&target_port),
+            target_port > 0,
             "target_port must be in range 1-65535, got {target_port}"
         );
         self.ports.push((port, target_port));
@@ -430,9 +424,11 @@ impl ServiceFixture {
             .ports
             .iter()
             .map(|(port, target_port)| ServicePort {
-                port: *port,
+                port: i32::from(*port),
                 target_port: Some(
-                    k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(*target_port),
+                    k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(i32::from(
+                        *target_port,
+                    )),
                 ),
                 ..Default::default()
             })
@@ -759,14 +755,6 @@ mod tests {
         let _ = DeploymentFixture::new("my-app")
             .image("nginx:latest")
             .port(0);
-    }
-
-    #[test]
-    #[should_panic(expected = "port must be in range 1-65535")]
-    fn test_deployment_invalid_port_too_high_panics() {
-        let _ = DeploymentFixture::new("my-app")
-            .image("nginx:latest")
-            .port(65536);
     }
 
     #[test]
