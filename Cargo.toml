@@ -2,7 +2,7 @@
 name = "seppo"
 version = "0.1.0"
 edition = "2021"
-authors = ["Yair <yair@example.com>"]
+authors = ["Yair <yair.etziony@false-systems.com>"]
 license = "Apache-2.0"
 description = "Kubernetes testing framework with multi-cloud cluster management"
 repository = "https://github.com/yairfalse/seppo"
