@@ -100,3 +100,47 @@ impl ClusterProvider for ExistingProvider {
         "existing"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_existing_provider_name() {
+        let provider = ExistingProvider::default();
+        assert_eq!(provider.name(), "existing");
+    }
+
+    #[tokio::test]
+    async fn test_existing_delete_is_noop() {
+        let provider = ExistingProvider::default();
+        let result = provider.delete("any-cluster").await;
+        assert!(result.is_ok(), "delete() should be a no-op for existing clusters");
+    }
+
+    #[tokio::test]
+    async fn test_existing_load_image_returns_not_available() {
+        let provider = ExistingProvider::default();
+        let result = provider.load_image("cluster", "image:v1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ProviderError::NotAvailable(_)),
+            "Should return NotAvailable, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_existing_kubeconfig_default_path() {
+        let provider = ExistingProvider::new(None, None);
+        let path = provider.kubeconfig("any").await.unwrap();
+        assert!(path.ends_with("/.kube/config"));
+    }
+
+    #[tokio::test]
+    async fn test_existing_kubeconfig_custom_path() {
+        let provider = ExistingProvider::new(Some("/custom/kubeconfig".to_string()), None);
+        let path = provider.kubeconfig("any").await.unwrap();
+        assert_eq!(path, "/custom/kubeconfig");
+    }
+}
