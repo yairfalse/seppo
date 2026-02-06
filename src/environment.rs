@@ -208,6 +208,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_manifest_rejects_missing_file() {
+        let result = apply_manifest("/nonexistent/path/missing.yaml").await;
+        assert!(matches!(result, Err(EnvironmentError::ManifestNotFound(p)) if p.contains("missing.yaml")));
+    }
+
+    #[tokio::test]
+    async fn test_run_setup_script_rejects_missing_script() {
+        let result = run_setup_script("/nonexistent/path/missing.sh").await;
+        assert!(matches!(result, Err(EnvironmentError::SetupScriptNotFound(p)) if p.contains("missing.sh")));
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real cluster
     async fn test_setup_loads_images() {
         let config = Config::new(ClusterConfig::kind("env-test")).environment(
             EnvironmentConfig::new()
@@ -215,12 +228,12 @@ mod tests {
                 .image("backend:latest"),
         );
 
-        // This will fail without a real cluster, but tests the API
         let result = setup(&config).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok(), "setup should succeed: {result:?}");
     }
 
     #[tokio::test]
+    #[ignore] // Requires real cluster
     async fn test_setup_applies_manifests() {
         let config =
             Config::new(ClusterConfig::existing("manifest-test").kubeconfig("~/.kube/config"))
@@ -231,10 +244,11 @@ mod tests {
                 );
 
         let result = setup(&config).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok(), "setup should succeed: {result:?}");
     }
 
     #[tokio::test]
+    #[ignore] // Requires real cluster
     async fn test_setup_with_wait_conditions() {
         let config = Config::new(ClusterConfig::existing("wait-test")).environment(
             EnvironmentConfig::new()
@@ -243,25 +257,26 @@ mod tests {
         );
 
         let result = setup(&config).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok(), "setup should succeed: {result:?}");
     }
 
     #[tokio::test]
+    #[ignore] // Requires real cluster
     async fn test_setup_with_setup_script() {
         let config = Config::new(ClusterConfig::existing("script-test"))
             .environment(EnvironmentConfig::new().setup_script("./scripts/setup.sh"));
 
         let result = setup(&config).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok(), "setup should succeed: {result:?}");
     }
 
     #[tokio::test]
+    #[ignore] // Requires real cluster
     async fn test_setup_empty_environment() {
         let config = Config::new(ClusterConfig::existing("empty-env-test"));
 
-        // Empty environment should succeed (no-op)
         let result = setup(&config).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok(), "empty environment setup should succeed: {result:?}");
     }
 
     #[test]

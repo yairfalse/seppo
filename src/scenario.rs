@@ -48,7 +48,7 @@ pub enum ScenarioError {
     TeardownFailed(String),
 }
 
-/// Type alias for async action returning Result<T, ScenarioError>
+/// Type alias for async action returning `Result<T, ScenarioError>`
 type AsyncAction<T> =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<T, ScenarioError>> + Send>> + Send>;
 
@@ -65,6 +65,7 @@ pub struct Scenario<T = ()> {
 
 impl Scenario<()> {
     /// Create a new scenario with a name
+    #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -80,6 +81,7 @@ impl Scenario<()> {
 
 impl<T: Send + 'static> Scenario<T> {
     /// Define the precondition (Given)
+    #[must_use]
     pub fn given<F, Fut>(mut self, description: &str, setup: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -91,6 +93,7 @@ impl<T: Send + 'static> Scenario<T> {
     }
 
     /// Define the action (When) and return a new scenario with the result type
+    #[must_use]
     pub fn when<F, Fut, R>(self, description: &str, action: F) -> Scenario<R>
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -109,6 +112,7 @@ impl<T: Send + 'static> Scenario<T> {
     }
 
     /// Define the assertion (Then)
+    #[must_use]
     pub fn then<F>(mut self, description: &str, assertion: F) -> Self
     where
         F: FnOnce(T) + Send + 'static,
@@ -119,14 +123,17 @@ impl<T: Send + 'static> Scenario<T> {
     }
 
     /// Run the scenario
+    ///
+    /// # Errors
+    ///
+    /// Returns `ScenarioError` if any step (given/when/then) fails.
     pub async fn run(self) -> Result<(), ScenarioError> {
-        // Print scenario header
         println!("\n📋 Scenario: {}", self.name);
 
         // Run Given
         if let Some(setup) = self.given {
             if let Some(desc) = &self.given_desc {
-                println!("   Given {}", desc);
+                println!("   Given {desc}");
             }
             setup().await?;
         }
@@ -134,7 +141,7 @@ impl<T: Send + 'static> Scenario<T> {
         // Run When
         let result = if let Some(action) = self.when {
             if let Some(desc) = &self.when_desc {
-                println!("   When {}", desc);
+                println!("   When {desc}");
             }
             Some(action().await?)
         } else {
@@ -144,18 +151,17 @@ impl<T: Send + 'static> Scenario<T> {
         // Run Then
         if let Some(assertion) = self.then {
             if let Some(desc) = &self.then_desc {
-                println!("   Then {}", desc);
+                println!("   Then {desc}");
             }
             match result {
                 Some(result) => {
-                    // Catch panics from assertions and convert to ScenarioError
                     let assertion_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             assertion(result);
                         }));
                     if let Err(panic) = assertion_result {
                         let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                            s.to_string()
+                            (*s).to_string()
                         } else if let Some(s) = panic.downcast_ref::<String>() {
                             s.clone()
                         } else {
@@ -165,7 +171,6 @@ impl<T: Send + 'static> Scenario<T> {
                     }
                 }
                 None => {
-                    // If a 'then' assertion was defined but no 'when' result was available
                     return Err(ScenarioError::AssertionFailed(
                         "Then assertion defined but no result from When step to assert on"
                             .to_string(),
@@ -193,6 +198,7 @@ struct Step {
 
 impl Steps {
     /// Create a new steps-based scenario
+    #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -201,6 +207,7 @@ impl Steps {
     }
 
     /// Add a step to the scenario
+    #[must_use]
     pub fn step<F, Fut>(mut self, description: &str, action: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -214,6 +221,10 @@ impl Steps {
     }
 
     /// Run all steps in order
+    ///
+    /// # Errors
+    ///
+    /// Returns `ScenarioError` if any step fails.
     pub async fn run(self) -> Result<(), ScenarioError> {
         println!("\n📋 Scenario: {}", self.name);
 

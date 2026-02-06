@@ -535,8 +535,8 @@ pub enum ContextError {
     #[error("Failed to get logs: {0}")]
     LogsError(String),
 
-    #[error("Wait timeout: {0}")]
-    WaitTimeout(String),
+    #[error("{0}")]
+    WaitTimeout(#[from] crate::wait::WaitError),
 
     #[error("Failed to get events: {0}")]
     EventsError(String),
@@ -1755,9 +1755,9 @@ impl Context {
             }
 
             if start.elapsed() >= timeout {
-                return Err(ContextError::WaitTimeout(format!(
-                    "Timed out waiting for {name} after {timeout:?}"
-                )));
+                return Err(crate::wait::WaitError::new(name, timeout, start.elapsed())
+                    .with_state("condition not met")
+                    .into());
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -1848,9 +1848,9 @@ impl Context {
             }
 
             if start.elapsed() >= timeout {
-                return Err(ContextError::WaitTimeout(format!(
-                    "Timed out waiting for {name} to be deleted after {timeout:?}"
-                )));
+                return Err(crate::wait::WaitError::new(name, timeout, start.elapsed())
+                    .with_state("still exists")
+                    .into());
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -1933,9 +1933,13 @@ impl Context {
             }
 
             if start.elapsed() >= timeout {
-                return Err(ContextError::WaitTimeout(format!(
-                    "Timed out waiting for PVC {name} to be bound after {timeout:?}"
-                )));
+                return Err(crate::wait::WaitError::new(
+                    format!("pvc/{name}"),
+                    timeout,
+                    start.elapsed(),
+                )
+                .with_state("not bound")
+                .into());
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -4209,12 +4213,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires kubeconfig to construct Context
     async fn test_retry_succeeds_on_transient_failure() {
-        // Skip if no kubeconfig available
-        let client = match kube::Client::try_default().await {
-            Ok(client) => client,
-            Err(_) => return,
-        };
+        let client = kube::Client::try_default()
+            .await
+            .expect("requires kubeconfig");
         let ctx = Context {
             client,
             namespace: "test".to_string(),
@@ -4242,12 +4245,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires kubeconfig to construct Context
     async fn test_retry_fails_after_max_attempts() {
-        // Skip if no kubeconfig available
-        let client = match kube::Client::try_default().await {
-            Ok(client) => client,
-            Err(_) => return,
-        };
+        let client = kube::Client::try_default()
+            .await
+            .expect("requires kubeconfig");
         let ctx = Context {
             client,
             namespace: "test".to_string(),

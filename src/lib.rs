@@ -70,6 +70,7 @@ pub mod metrics;
 pub mod portforward;
 pub mod provider;
 pub mod runner;
+pub mod scenario;
 pub mod stack;
 pub mod telemetry;
 pub mod traffic;
@@ -98,6 +99,7 @@ pub use provider::{
     get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
 };
 pub use runner::{run, run_with_env, RunResult, RunnerError};
+pub use scenario::{Scenario, ScenarioError, Steps};
 pub use stack::{stack, ServiceBuilder, Stack, StackError};
 pub use telemetry::init_logging;
 pub use traffic::{HttpAssert, RequestRecord, TrafficError, TrafficRecorder};
