@@ -4,7 +4,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType, ReturnType};
+use syn::{FnArg, ItemFn, Pat, PatType, ReturnType};
 
 /// Attribute macro for Kubernetes integration tests.
 ///
@@ -52,29 +52,40 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, PatType, ReturnType};
 /// Note: Namespace is always kept on failure for debugging.
 #[proc_macro_attribute]
 pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input_fn = parse_macro_input!(item as ItemFn);
+    let input_fn = syn::parse_macro_input!(item as ItemFn);
+    test_impl(&input_fn).into()
+}
 
-    let fn_name = &input_fn.sig.ident;
-    let fn_block = &input_fn.block;
-    let fn_vis = &input_fn.vis;
-    let fn_attrs = &input_fn.attrs;
-
-    // Check if function takes a Context parameter named "ctx"
-    let has_ctx_param = input_fn.sig.inputs.iter().any(|arg| {
+/// Check if a function has a parameter named "ctx"
+fn has_ctx_param(input_fn: &ItemFn) -> bool {
+    input_fn.sig.inputs.iter().any(|arg| {
         if let FnArg::Typed(PatType { pat, .. }) = arg {
             if let Pat::Ident(ident) = pat.as_ref() {
                 return ident.ident == "ctx";
             }
         }
         false
-    });
+    })
+}
 
-    // Check if function returns a Result type
-    let has_result_return = matches!(&input_fn.sig.output, ReturnType::Type(..));
+/// Check if a function has a return type (i.e., `-> Result<...>`)
+fn has_result_return(input_fn: &ItemFn) -> bool {
+    matches!(&input_fn.sig.output, ReturnType::Type(..))
+}
 
-    let output = if has_ctx_param {
+/// Inner implementation that works with `proc_macro2` types for testability
+fn test_impl(input_fn: &ItemFn) -> proc_macro2::TokenStream {
+    let fn_name = &input_fn.sig.ident;
+    let fn_block = &input_fn.block;
+    let fn_vis = &input_fn.vis;
+    let fn_attrs = &input_fn.attrs;
+
+    let ctx = has_ctx_param(input_fn);
+    let result_return = has_result_return(input_fn);
+
+    if ctx {
         // Function expects ctx parameter - create and inject it
-        let test_execution = if has_result_return {
+        let test_execution = if result_return {
             // Handle Result return type - convert errors to panics for test failure
             quote! {
                 let test_result: Result<(), Box<dyn std::error::Error + Send + Sync>> = (async {
@@ -157,7 +168,102 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 #fn_block
             }
         }
-    };
+    }
+}
 
-    output.into()
+#[cfg(test)]
+mod tests {
+    use super::{has_ctx_param, has_result_return, test_impl};
+    use syn::ItemFn;
+
+    fn parse_fn(code: &str) -> ItemFn {
+        syn::parse_str(code).expect("Failed to parse test function")
+    }
+
+    #[test]
+    fn test_has_ctx_param_with_ctx() {
+        let f = parse_fn("async fn test_it(ctx: Context) {}");
+        assert!(has_ctx_param(&f));
+    }
+
+    #[test]
+    fn test_has_ctx_param_without_ctx() {
+        let f = parse_fn("async fn test_it() {}");
+        assert!(!has_ctx_param(&f));
+    }
+
+    #[test]
+    fn test_has_ctx_param_different_name() {
+        let f = parse_fn("async fn test_it(context: Context) {}");
+        assert!(!has_ctx_param(&f), "Only 'ctx' name should match");
+    }
+
+    #[test]
+    fn test_has_result_return_with_result() {
+        let f = parse_fn(
+            "async fn test_it(ctx: Context) -> Result<(), Box<dyn std::error::Error>> {}",
+        );
+        assert!(has_result_return(&f));
+    }
+
+    #[test]
+    fn test_has_result_return_without_result() {
+        let f = parse_fn("async fn test_it(ctx: Context) {}");
+        assert!(!has_result_return(&f));
+    }
+
+    #[test]
+    fn test_impl_with_ctx_generates_context_new() {
+        let f = parse_fn("async fn test_k8s(ctx: Context) { ctx.apply(&cm).await.unwrap(); }");
+        let output = test_impl(&f).to_string();
+
+        assert!(output.contains("Context :: new"), "Should create Context");
+        assert!(output.contains("tokio :: test"), "Should have tokio::test");
+        assert!(output.contains("catch_unwind"), "Should wrap with catch_unwind");
+        assert!(output.contains("cleanup"), "Should call cleanup on success");
+        assert!(
+            output.contains("collect_diagnostics"),
+            "Should collect diagnostics on failure"
+        );
+    }
+
+    #[test]
+    fn test_impl_with_ctx_and_result_generates_error_handling() {
+        let f = parse_fn(
+            "async fn test_k8s(ctx: Context) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }",
+        );
+        let output = test_impl(&f).to_string();
+
+        assert!(
+            output.contains("map_err"),
+            "Should convert errors for Result return type"
+        );
+    }
+
+    #[test]
+    fn test_impl_without_ctx_generates_simple_wrapper() {
+        let f = parse_fn("async fn test_simple() { assert!(true); }");
+        let output = test_impl(&f).to_string();
+
+        assert!(output.contains("tokio :: test"), "Should have tokio::test");
+        assert!(
+            !output.contains("Context :: new"),
+            "Should NOT create Context without ctx param"
+        );
+        assert!(
+            !output.contains("catch_unwind"),
+            "Should NOT use catch_unwind without ctx"
+        );
+    }
+
+    #[test]
+    fn test_impl_preserves_function_name() {
+        let f = parse_fn("async fn my_custom_test(ctx: Context) {}");
+        let output = test_impl(&f).to_string();
+
+        assert!(
+            output.contains("my_custom_test"),
+            "Should preserve function name"
+        );
+    }
 }
