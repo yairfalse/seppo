@@ -1,74 +1,41 @@
 //! Seppo - Kubernetes SDK
 //!
 //! A native Rust library for Kubernetes operations.
-//! No config files, just code.
+//! Connects via your kubeconfig — no config files, just code.
 //!
-//! # Example
+//! # Standalone Usage
 //!
-//! ```no_run
-//! use seppo::{ClusterConfig, EnvironmentConfig, WaitCondition, Config, setup};
-//!
-//! #[tokio::test]
-//! async fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Define cluster
-//!     let cluster = ClusterConfig::kind("my-test")
-//!         .workers(2);
-//!
-//!     // Define environment
-//!     let env = EnvironmentConfig::new()
-//!         .image("myapp:test")
-//!         .manifest("./k8s/deployment.yaml")
-//!         .wait(WaitCondition::available("deployment/myapp"));
-//!
-//!     // Setup and run
-//!     let config = Config::new(cluster).environment(env);
-//!     setup(&config).await?;
-//!
-//!     // Your tests here...
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! # Quick Start
-//!
-//! ```no_run
-//! use seppo::cluster;
+//! ```ignore
+//! use seppo::Context;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create Kind cluster
-//!     cluster::create("test").await?;
+//!     let ctx = Context::new().await?;
 //!
-//!     // Load image
-//!     cluster::load_image("test", "myapp:v1").await?;
-//!
-//!     // Run your tests...
-//!
-//!     // Cleanup
-//!     cluster::delete("test").await?;
-//!
+//!     ctx.apply(&my_deployment).await?;
+//!     ctx.wait_ready("deployment/myapp").await?;
+//!     ctx.cleanup().await?;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! # Providers
+//! # With Test Macro
 //!
-//! - **Kind** (default): Local Docker-based clusters
-//! - **Minikube**: Local VM-based clusters
-//! - **Existing**: Use pre-existing clusters
+//! ```ignore
+//! #[seppo::test]
+//! async fn test_my_app(ctx: seppo::Context) {
+//!     ctx.apply(&my_deployment).await?;
+//!     ctx.wait_ready("deployment/myapp").await?;
+//! }
+//! ```
 
 pub mod assertions;
-pub mod cluster;
-pub mod config;
 pub mod context;
 pub mod diagnostics;
-pub mod environment;
 pub mod eventually;
 pub mod fixtures;
 pub mod metrics;
 pub mod portforward;
-pub mod provider;
 pub mod runner;
 pub mod scenario;
 pub mod stack;
@@ -80,8 +47,6 @@ pub mod wait;
 pub use assertions::{
     AssertionError, DeploymentAssertion, PodAssertion, PvcAssertion, ServiceAssertion,
 };
-pub use cluster::{create, delete, load_image};
-pub use config::{ClusterConfig, ClusterProviderType, Config, EnvironmentConfig, WaitCondition};
 pub use context::{
     parse_forward_target, parse_resource_ref, Context, ContextError, ForwardTarget, ResourceKind,
 };
@@ -90,14 +55,10 @@ pub use context::{
 #[allow(deprecated)]
 pub use context::TestContext;
 pub use diagnostics::Diagnostics;
-pub use environment::{setup, EnvironmentError, SetupResult};
 pub use eventually::{consistently, eventually, ConditionError, Consistently, Eventually};
 pub use fixtures::{deployment, pod, service, DeploymentFixture, PodFixture, ServiceFixture};
 pub use metrics::{MetricsError, PodMetrics};
 pub use portforward::{PortForward, PortForwardError};
-pub use provider::{
-    get_provider, ClusterProvider, ExistingProvider, KindProvider, MinikubeProvider, ProviderError,
-};
 pub use runner::{run, run_with_env, RunResult, RunnerError};
 pub use scenario::{Scenario, ScenarioError, Steps};
 pub use stack::{stack, ServiceBuilder, Stack, StackError};

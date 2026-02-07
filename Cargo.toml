@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Yair <yair.etziony@false-systems.com>"]
 license = "Apache-2.0"
-description = "Kubernetes testing framework with multi-cloud cluster management"
+description = "Kubernetes SDK — native library, no config files, just code"
 repository = "https://github.com/yairfalse/seppo"
-keywords = ["kubernetes", "testing", "kind", "eks", "integration-tests"]
+keywords = ["kubernetes", "testing", "kube", "sdk", "integration-tests"]
 categories = ["development-tools::testing"]
 
 [workspace]
@@ -19,7 +19,6 @@ path = "src/lib.rs"
 [dependencies]
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }
-async-trait = "0.1"
 
 # K8s client
 kube = { version = "2.0", features = ["runtime", "derive", "ws"] }
